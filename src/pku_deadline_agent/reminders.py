@@ -119,7 +119,7 @@ $pkuIcon=New-Object System.Windows.Forms.NotifyIcon
 try {
     $pkuIcon.Icon=[Drawing.SystemIcons]::Information
     $pkuIcon.Visible=$true
-    $pkuIcon.ShowBalloonTip(5000,'PKU Deadline Agent',$pkuText,[Windows.Forms.ToolTipIcon]::Info)
+    $pkuIcon.ShowBalloonTip(5000,'Deadline',$pkuText,[Windows.Forms.ToolTipIcon]::Info)
     for($pkuTick=0;$pkuTick -lt 50;$pkuTick++) {
         [Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 100

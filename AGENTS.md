@@ -1,4 +1,4 @@
-# PKU Deadline Agent — Agent 开发约定
+# Deadline — Agent 开发约定
 
 ## 项目目标与用户背景
 

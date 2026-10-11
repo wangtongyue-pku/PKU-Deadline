@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 > nul
 cd /d "%~dp0"
-title PKU Deadline Agent
+title Deadline
 
 echo ============================================
-echo   PKU Deadline Agent  -  http://127.0.0.1:8502
+echo   Deadline  -  http://127.0.0.1:8502
 echo ============================================
 echo.
 echo   This window IS the service. Closing it stops the app.

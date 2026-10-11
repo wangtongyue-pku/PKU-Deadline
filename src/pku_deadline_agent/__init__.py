@@ -1,1 +1,1 @@
-"""PKU Deadline Agent: local-first deadline management."""
+"""Deadline: local-first deadline management."""
