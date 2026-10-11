@@ -1,0 +1,41 @@
+# Python / local tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.local-tmp/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Credentials and private local configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+secrets/
+credentials/
+cookies/
+*.pem
+*.key
+
+# Private data, database sidecars, exports and logs
+data/
+exports/
+logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

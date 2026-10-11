@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pku-deadline-agent"
+version = "0.1.0"
+description = "Local-first personal academic deadline manager"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40,<2",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+# Optional: drives your already-installed Edge/Chrome for one-click sync.
+# Uses channel="msedge"/"chrome"; no bundled Chromium download is required.
+browser = ["playwright>=1.40,<2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
