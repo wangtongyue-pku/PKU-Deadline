@@ -43,7 +43,7 @@ DEFAULT_FETCH_LIMIT = 50
 # Only these operations may ever appear in an adapter's operation log. The mock
 # records every call; the real adapter must do the same so tests can prove that
 # nothing but reads happened.
-ALLOWED_OPERATIONS = ("list_folders", "fetch_since", "close")
+ALLOWED_OPERATIONS = ("list_folders", "fetch_since", "fetch_uids", "close")
 
 # IMAP commands that must never be issued by this application. Kept here so the
 # real adapter (7B) can assert against the same list it is tested with.
@@ -104,6 +104,15 @@ class EmailAdapter(Protocol):
         including per-message warnings and any parse rejections. Raises
         EmailAdapterError subclasses on failure; never returns an empty batch as
         a way to signal an error.
+        """
+        ...
+
+    def fetch_uids(self, folder: str, uids) -> EmailFetchResult:
+        """Fetch exactly the named messages (retry path), read-only.
+
+        Used by the sync service to retry messages that failed to parse earlier:
+        a rejected message is recorded with its UID, never silently skipped, and
+        a later retry re-reads just that one.
         """
         ...
 
@@ -185,6 +194,48 @@ class MockEmailAdapter:
             has_more=bool(rejected),
             rejections=tuple(rejections),
             warnings=tuple(warnings),
+            rejected_uids=tuple(
+                uid for uid in batch
+                if uid not in {record.uid for record in records}
+            ),
+        )
+
+    def fetch_uids(self, folder: str, uids) -> EmailFetchResult:
+        """Re-read exactly the named messages (retry path); read-only."""
+        self.operations.append("fetch_uids")
+        if self.closed:
+            raise EmailAdapterError("会话已关闭。")
+        if folder not in self._folders:
+            raise EmailLayoutChanged(f"文件夹不存在: {folder!r}")
+        from pku_deadline_agent.email_parse import parse_raw_email
+
+        records, warnings, rejections = [], [], []
+        for uid in sorted(set(uids)):
+            raw = self._folders[folder].get(uid)
+            if raw is None:
+                rejections.append(f"UID {uid}: 邮件不存在。")
+                continue
+            try:
+                record, record_warnings = parse_raw_email(
+                    raw, uid=uid, folder=folder, uidvalidity=self.uidvalidity
+                )
+            except ValueError as error:
+                rejections.append(f"UID {uid}: {error}")
+                continue
+            records.append(record)
+            warnings.extend(record_warnings)
+        return EmailFetchResult(
+            folder=folder,
+            uidvalidity=self.uidvalidity,
+            records=tuple(records),
+            highest_uid=max(set(uids)) if uids else 0,
+            has_more=False,
+            rejections=tuple(rejections),
+            warnings=tuple(warnings),
+            rejected_uids=tuple(
+                uid for uid in sorted(set(uids))
+                if uid not in {record.uid for record in records}
+            ),
         )
 
     def close(self) -> None:

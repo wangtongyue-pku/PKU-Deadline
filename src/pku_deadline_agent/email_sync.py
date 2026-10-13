@@ -22,8 +22,8 @@ from pku_deadline_agent.email_adapter import (
     EmailAdapterError,
 )
 from pku_deadline_agent.email_credentials import CredentialStore
+from pku_deadline_agent.email_intel import analyze_email
 from pku_deadline_agent.email_models import EmailAnalysis
-from pku_deadline_agent.email_parse import analyze_email
 from pku_deadline_agent.time_utils import beijing_now
 
 INITIAL_DAYS = 7
@@ -34,6 +34,7 @@ INITIAL_MAX = 30
 class MailboxState:
     uidvalidity: int
     highest_uid: int
+    failed_uids: tuple[int, ...] = ()   # parse failures recorded for retry
 
 
 class MailboxStateStore:
@@ -57,13 +58,15 @@ class EmailSyncReport:
     """What one sync pass produced — shown to the user before anything is written."""
 
     folder: str
-    mode: str                      # "initial" or "incremental"
+    mode: str                      # "initial", "incremental" or "retry"
     uidvalidity: int
     highest_uid: int
     analyses: tuple[EmailAnalysis, ...]
     has_more: bool
     rejections: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    retried_uids: tuple[int, ...] = field(default_factory=tuple)
+    still_failed_uids: tuple[int, ...] = field(default_factory=tuple)
 
     @property
     def trustworthy(self) -> bool:
@@ -102,11 +105,17 @@ class EmailSyncService:
 
     # -- public -----------------------------------------------------------
 
-    def sync(self, folder: str = DEFAULT_FOLDER) -> EmailSyncReport:
+    def sync(self, folder: str = DEFAULT_FOLDER, *, retry_failed: bool = True) -> EmailSyncReport:
+        """One pass. Failed-parse messages from earlier passes are retried first
+        (recorded, never silently skipped), then the normal incremental run."""
         state = self._state.get(folder)
         if state is None:
-            return self._run_initial(folder)
-        return self._run_incremental(folder, state)
+            report = self._run_initial(folder)
+        else:
+            report = self._run_incremental(folder, state)
+        if retry_failed and state is not None and state.failed_uids:
+            report = self._retry(folder, report, state.failed_uids)
+        return report
 
     def reset_state(self, folder: str = DEFAULT_FOLDER) -> None:
         """Forget the cursor (user action); the next sync re-runs initial."""
@@ -156,7 +165,19 @@ class EmailSyncService:
 
     def _finish(self, folder: str, result, mode: str) -> EmailSyncReport:
         analyses = tuple(analyze_email(record) for record in result.records)
-        self._state.set(folder, MailboxState(result.uidvalidity, result.highest_uid))
+        # Cursor advances past failures, but they are *recorded* on the state so
+        # a later pass retries them: one bad message never blocks the others,
+        # and none is silently lost.
+        previous_failed = (self._state.get(folder).failed_uids
+                           if self._state.get(folder) else ())
+        merged_failed = tuple(dict.fromkeys(
+            (*previous_failed, *result.rejected_uids)
+        )) if previous_failed or result.rejected_uids else ()
+        succeeded_now = {record.uid for record in result.records}
+        merged_failed = tuple(uid for uid in merged_failed if uid not in succeeded_now)
+        self._state.set(folder, MailboxState(
+            result.uidvalidity, result.highest_uid, failed_uids=merged_failed
+        ))
         return EmailSyncReport(
             folder=folder,
             mode=mode,
@@ -166,6 +187,39 @@ class EmailSyncService:
             has_more=result.has_more,
             rejections=tuple(result.rejections),
             warnings=tuple(result.warnings),
+            still_failed_uids=merged_failed,
+        )
+
+    def _retry(self, folder: str, report: EmailSyncReport, failed_uids) -> EmailSyncReport:
+        """Re-read the recorded failures; successes leave the retry list."""
+        adapter = self._adapter_factory()
+        try:
+            result = adapter.fetch_uids(folder, failed_uids)
+        finally:
+            adapter.close()
+
+        retried = [record.uid for record in result.records]
+        still = [uid for uid in failed_uids if uid not in retried]
+        state = self._state.get(folder)
+        if state is not None:
+            self._state.set(folder, MailboxState(
+                state.uidvalidity, state.highest_uid, failed_uids=tuple(still)
+            ))
+        analyses = tuple(analyze_email(record) for record in result.records)
+        warnings = (*report.warnings, *result.warnings)
+        if still:
+            warnings = (*warnings, f"仍有 {len(still)} 封邮件解析失败，已记录待重试：{still}。")
+        return EmailSyncReport(
+            folder=report.folder,
+            mode="retry",
+            uidvalidity=result.uidvalidity,
+            highest_uid=report.highest_uid,
+            analyses=(*report.analyses, *analyses),
+            has_more=report.has_more,
+            rejections=(*report.rejections, *result.rejections),
+            warnings=warnings,
+            retried_uids=tuple(retried),
+            still_failed_uids=tuple(still),
         )
 
 

@@ -23,22 +23,28 @@ from pku_deadline_agent.email_adapter import (
     MockEmailAdapter,
 )
 from pku_deadline_agent.email_models import (
-    COMPETITION_RESEARCH,
+    ADVERTISEMENT,
+    COMPETITION,
     COURSE_ADMIN,
     EmailDeadline,
     EmailFetchResult,
     EVENT_REGISTRATION,
     EVENT_TIME,
     GENERAL_NEWS,
-    IMPORTANT_NOTICE,
+    HOMEWORK_DEADLINE,
+    IMPORTANCE_HIGH,
     LECTURE,
+    MATERIAL_SUBMISSION_DEADLINE,
+    NEEDS_REVIEW,
     RawEmailRecord,
     REGISTRATION_DEADLINE,
-    SUSPECTED_SPAM,
+    RESEARCH_OPPORTUNITY,
+    SCHOOL_NOTICE,
     TASK_DEADLINE,
     UNCLEAR_TIME,
 )
-from pku_deadline_agent.email_parse import analyze_email, parse_raw_email
+from pku_deadline_agent.email_intel import analyze_email, classify_email
+from pku_deadline_agent.email_parse import parse_raw_email
 from pku_deadline_agent.time_utils import BEIJING
 
 NY = ZoneInfo("America/New_York")
@@ -179,11 +185,12 @@ def test_classification_rules():
     cases = [
         (make_email(subject="关于期末考试安排的通知"), COURSE_ADMIN),
         (make_email(subject="学术讲座：虚构主题", sender="t@pku.edu.cn"), LECTURE),
-        (make_email(subject="程序设计竞赛报名", sender="club@pku.edu.cn"), COMPETITION_RESEARCH),
+        (make_email(subject="ACM 程序设计竞赛报名", sender="club@pku.edu.cn"), COMPETITION),
+        (make_email(subject="课题组科研助理招募", sender="prof@pku.edu.cn"), RESEARCH_OPPORTUNITY),
         (make_email(subject="校园探索活动报名"), EVENT_REGISTRATION),
-        (make_email(subject="重要通知", sender="dean@pku.edu.cn"), IMPORTANT_NOTICE),
-        (make_email(subject="周末去哪玩", sender="friend@qq.com"), GENERAL_NEWS),
-        (make_email(subject="限时优惠", sender="shop@example.com", body="点击退订"), SUSPECTED_SPAM),
+        (make_email(subject="重要通知", sender="dean@pku.edu.cn"), SCHOOL_NOTICE),
+        (make_email(subject="周末去哪玩", sender="friend@qq.com"), NEEDS_REVIEW),
+        (make_email(subject="限时优惠", sender="shop@example.com", body="点击退订"), ADVERTISEMENT),
     ]
     for raw, expected in cases:
         record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
@@ -211,8 +218,29 @@ def test_task_deadline_and_slash_dates():
     raw = make_email(subject="作业", body="作业提交截止2026-12-01。")
     record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
     deadlines = analyze_email(record).deadlines
-    assert any(d.kind == TASK_DEADLINE and d.due_at == datetime(2026, 12, 1, 0, 0, tzinfo=BEIJING)
+    assert any(d.kind == HOMEWORK_DEADLINE and d.due_at == datetime(2026, 12, 1, 0, 0, tzinfo=BEIJING)
                for d in deadlines)
+
+
+def test_material_submission_deadline_is_distinct():
+    raw = make_email(subject="奖学金申请", body="请于2026年12月10日前提交申请材料。")
+    record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
+    deadlines = analyze_email(record).deadlines
+    assert any(d.kind == MATERIAL_SUBMISSION_DEADLINE
+               and d.due_at == datetime(2026, 12, 10, 0, 0, tzinfo=BEIJING)
+               for d in deadlines)
+
+
+def test_plain_mentioned_dates_do_not_become_deadlines():
+    """Requirement 3: an ordinary mentioned date is not promoted to a deadline."""
+    raw = make_email(subject="回执", body="本通知发布于2026年11月1日。")
+    record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
+    assert analyze_email(record).deadlines == ()
+
+    ambiguous = make_email(subject="活动", body="活动11月20日开始，报名从速。")
+    record2, _ = parse_raw_email(ambiguous, uid=2, folder=DEFAULT_FOLDER, uidvalidity=1)
+    kinds = {d.kind for d in analyze_email(record2).deadlines}
+    assert EVENT_TIME in kinds or UNCLEAR_TIME in kinds  # cues exist, value kept
 
 
 def test_date_without_year_defaults_to_the_message_year():
@@ -327,7 +355,9 @@ def test_the_contract_has_no_way_to_change_a_mailbox():
         name for name, _ in inspect.getmembers(EmailAdapter, inspect.isfunction)
         if not name.startswith("_")
     }
-    assert methods == {"list_folders", "fetch_since", "close"}
+    # fetch_uids is the read-only retry path (re-reading messages that failed to
+    # parse earlier); it is in ALLOWED_OPERATIONS and can only read.
+    assert methods == {"list_folders", "fetch_since", "fetch_uids", "close"}
     banned = ("delete", "move", "send", "store", "mark", "expunge", "append", "copy", "upload")
     for name in methods:
         for word in banned:

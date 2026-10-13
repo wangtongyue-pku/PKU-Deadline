@@ -21,33 +21,59 @@ from datetime import datetime
 from pku_deadline_agent.time_utils import BEIJING
 
 # ---------------------------------------------------------------- categories
+#
+# Stage-7C taxonomy (requirement 1). 每一封邮件必有且只有一个分类；规则说不出
+# 理由的进「待确认邮件」，由人工核对——分类错误的邮件永远不会消失，只会降级展示。
 
-IMPORTANT_NOTICE = "重要通知"
 COURSE_ADMIN = "课程教务"
+SCHOOL_NOTICE = "学校通知"
+LECTURE = "讲座"
+RESEARCH_OPPORTUNITY = "科研机会"
+COMPETITION = "竞赛"
 EVENT_REGISTRATION = "活动报名"
-LECTURE = "学术讲座"
-COMPETITION_RESEARCH = "竞赛科研"
 GENERAL_NEWS = "普通资讯"
-SUSPECTED_SPAM = "疑似垃圾邮件"
+ADVERTISEMENT = "广告"
+NEEDS_REVIEW = "待确认邮件"
 
 EMAIL_CATEGORIES = (
-    IMPORTANT_NOTICE,
     COURSE_ADMIN,
-    EVENT_REGISTRATION,
+    SCHOOL_NOTICE,
     LECTURE,
-    COMPETITION_RESEARCH,
+    RESEARCH_OPPORTUNITY,
+    COMPETITION,
+    EVENT_REGISTRATION,
     GENERAL_NEWS,
-    SUSPECTED_SPAM,
+    ADVERTISEMENT,
+    NEEDS_REVIEW,
 )
 
 # --------------------------------------------------------------- deadline kinds
 
 REGISTRATION_DEADLINE = "报名截止"
+MATERIAL_SUBMISSION_DEADLINE = "材料提交截止"
+HOMEWORK_DEADLINE = "课程作业截止"
 EVENT_TIME = "活动举办时间"
 TASK_DEADLINE = "任务截止"
 UNCLEAR_TIME = "待确认时间"
 
-DEADLINE_KINDS = (REGISTRATION_DEADLINE, EVENT_TIME, TASK_DEADLINE, UNCLEAR_TIME)
+DEADLINE_KINDS = (
+    REGISTRATION_DEADLINE,
+    MATERIAL_SUBMISSION_DEADLINE,
+    HOMEWORK_DEADLINE,
+    EVENT_TIME,
+    TASK_DEADLINE,
+    UNCLEAR_TIME,
+)
+
+# ---------------------------------------------------------------- importance
+
+IMPORTANCE_HIGH = "高"
+IMPORTANCE_MEDIUM = "中"
+IMPORTANCE_LOW = "低"
+# Ordered weakest → strongest so ``max(..., key=IMPORTANCE_LEVELS.index)`` raises
+# importance instead of lowering it. (Listing 高 first once made a mail whose
+# deadline was inside the 3-day window come out as 中: the ordering is load-bearing.)
+IMPORTANCE_LEVELS = (IMPORTANCE_LOW, IMPORTANCE_MEDIUM, IMPORTANCE_HIGH)
 
 # --------------------------------------------------------------------- records
 
@@ -113,16 +139,32 @@ class EmailDeadline:
 
 @dataclass(frozen=True)
 class EmailAnalysis:
-    """Rule-based first pass over one message; the AI path builds on this later."""
+    """One message after the local rule pass: category, times, importance, actions.
+
+    All judgements carry reasons (``category_reason`` / ``importance_reasons`` /
+    ``action_reasons``) — a low-importance verdict is an explanation, not a
+    licence to hide the mail: the digest keeps every message visible.
+    """
 
     record: RawEmailRecord
     category: str
     category_reason: str
     deadlines: tuple[EmailDeadline, ...] = field(default_factory=tuple)
+    importance: str = IMPORTANCE_LOW
+    importance_reasons: tuple[str, ...] = field(default_factory=tuple)
+    action_needed: bool = False
+    action_reasons: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.category not in EMAIL_CATEGORIES:
             raise ValueError(f"未知的邮件分类: {self.category!r}")
+        if self.importance not in IMPORTANCE_LEVELS:
+            raise ValueError(f"未知的重要程度: {self.importance!r}")
+
+    @property
+    def incomplete(self) -> bool:
+        """The body was truncated: absence of deadlines here proves nothing."""
+        return self.record.body_truncated
 
 
 # ---------------------------------------------------------------- fetch result
@@ -132,10 +174,13 @@ class EmailAnalysis:
 class EmailFetchResult:
     """One incremental fetch batch.
 
-    ``rejections`` counts messages that could not be parsed at all; ``warnings``
-    counts conditions the user should know about (missing Message-ID, missing
-    date, truncated body). Following the stage-5 discipline: an empty batch with
-    warnings is not evidence that no mail exists.
+    ``rejections`` counts messages that could not be parsed at all;
+    ``rejected_uids`` carries the same failures as UIDs so the sync service can
+    remember and retry them (a rejected message is *recorded*, never silently
+    dropped). ``warnings`` counts conditions the user should know about
+    (missing Message-ID, missing date, truncated body). Following the stage-5
+    discipline: an empty batch with warnings is not evidence that no mail
+    exists.
     """
 
     folder: str
@@ -145,6 +190,7 @@ class EmailFetchResult:
     has_more: bool
     rejections: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    rejected_uids: tuple[int, ...] = field(default_factory=tuple)
 
     @property
     def trustworthy(self) -> bool:

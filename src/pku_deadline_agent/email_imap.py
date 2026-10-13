@@ -206,6 +206,58 @@ class RealImapAdapter:
             has_more=bool(beyond),
             rejections=tuple(rejections),
             warnings=tuple(warnings),
+            rejected_uids=tuple(
+                uid for uid in batch
+                if uid not in {record.uid for record in records}
+            ),
+        )
+
+    def fetch_uids(self, folder: str, uids) -> EmailFetchResult:
+        """Re-read exactly the named messages (retry path); read-only."""
+        self.operations.append("fetch_uids")
+        imap = self._connection()
+        try:
+            typ, _data = imap.select(folder, readonly=True)  # EXAMINE — read-only
+            self._raise_for_status(typ, f"EXAMINE {folder}")
+            uidvalidity = self._uidvalidity(imap)
+
+            records, warnings, rejections = [], [], []
+            from pku_deadline_agent.email_parse import parse_raw_email
+
+            for uid in sorted(set(uids)):
+                try:
+                    raw = self._fetch_raw(imap, uid)
+                    if raw is None:
+                        rejections.append(f"UID {uid}: 服务器未返回邮件内容。")
+                        continue
+                    record, record_warnings = parse_raw_email(
+                        raw, uid=uid, folder=folder, uidvalidity=uidvalidity
+                    )
+                except ValueError as error:
+                    rejections.append(f"UID {uid}: {error}")
+                    continue
+                records.append(record)
+                warnings.extend(record_warnings)
+        except imaplib.IMAP4.error as error:
+            raise self._as_adapter_error(error) from None
+        except (OSError, socket.timeout) as error:
+            raise EmailNetworkError(
+                f"与邮件服务器的连接中断（{error.__class__.__name__}）。"
+            ) from None
+
+        requested = sorted(set(uids))
+        return EmailFetchResult(
+            folder=folder,
+            uidvalidity=uidvalidity,
+            records=tuple(records),
+            highest_uid=max(requested) if requested else 0,
+            has_more=False,
+            rejections=tuple(rejections),
+            warnings=tuple(warnings),
+            rejected_uids=tuple(
+                uid for uid in requested
+                if uid not in {record.uid for record in records}
+            ),
         )
 
     def close(self) -> None:

@@ -26,18 +26,12 @@ from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
 
 from pku_deadline_agent.email_models import (
-    COMPETITION_RESEARCH,
-    COURSE_ADMIN,
     EmailDeadline,
-    EmailAnalysis,
-    EVENT_REGISTRATION,
     EVENT_TIME,
-    GENERAL_NEWS,
-    IMPORTANT_NOTICE,
-    LECTURE,
     RawEmailRecord,
+    HOMEWORK_DEADLINE,
+    MATERIAL_SUBMISSION_DEADLINE,
     REGISTRATION_DEADLINE,
-    SUSPECTED_SPAM,
     TASK_DEADLINE,
     UNCLEAR_TIME,
 )
@@ -189,35 +183,26 @@ def parse_raw_email(
     return record, tuple(warnings)
 
 
-# -------------------------------------------------------------- classification
+# ----------------------------------------------- deadline-kind classification
+#
+# Category classification lives in email_intel.py (stage 7C); this module keeps
+# only the *time* semantics: what a date inside a clause means.
 
-_SPAM_SIGNALS = ("退订", "unsubscribe", "优惠", "促销", "中奖", "点击链接领取", "限时抢购")
-_PKU_SENDER = "pku.edu.cn"
-
-_COURSE_WORDS = ("教务", "课程", "选课", "考试", "成绩", "作业", "教学", "补考", "缓考")
-_LECTURE_WORDS = ("讲座", "学术报告", "论坛", "研讨会", "沙龙", "报告会")
-_RESEARCH_WORDS = ("竞赛", "大赛", "比赛", "科研", "实验室", "课题组", "立项", "招募", "保研", "夏令营")
-_EVENT_WORDS = ("报名", "活动", "名额", "预约", "申请")
-
-
-def classify_email(record: RawEmailRecord) -> tuple[str, str]:
-    """Rule-based category. Returns ``(category, reason)``; rules are additive
-    and the first match wins, so the order is part of the contract."""
-    haystack = f"{record.sender}\n{record.subject}\n{record.body_text[:2000]}"
-
-    if any(word in haystack for word in _SPAM_SIGNALS) and not record.sender.endswith(_PKU_SENDER):
-        return SUSPECTED_SPAM, "含典型推广/退订特征且发件人不是北大域名。"
-    if record.sender.endswith(_PKU_SENDER) and any(w in haystack for w in _COURSE_WORDS):
-        return COURSE_ADMIN, "北大域名发件人且含教务/课程关键词。"
-    if any(w in haystack for w in _RESEARCH_WORDS):
-        return COMPETITION_RESEARCH, "含竞赛/科研/招募关键词。"
-    if any(w in haystack for w in _LECTURE_WORDS):
-        return LECTURE, "含讲座/论坛/报告关键词。"
-    if any(w in haystack for w in _EVENT_WORDS):
-        return EVENT_REGISTRATION, "含报名/活动关键词。"
-    if record.sender.endswith(_PKU_SENDER) and any(w in haystack for w in ("通知", "重要", "紧急")):
-        return IMPORTANT_NOTICE, "北大域名发件人的通知类邮件。"
-    return GENERAL_NEWS, "未命中任何规则，归入普通资讯。"
+# 「申请」 alone is deliberately *not* a registration cue: 「提交申请材料」 is a
+# material submission, not an event sign-up. Material and homework cues are
+# therefore tested before the registration cue, and 「申请」 only counts when a
+# real registration cue (报名/报名表/回执) is absent.
+_REGISTRATION_WORDS = ("报名", "注册", "选课", "回执", "报名表")
+_APPLICATION_WORDS = ("申请",)
+# 「发布于 / 举行于」name when something happened or will happen; they are not
+# deadline cues, so 「本通知发布于2026年11月1日」 stays an ordinary mentioned date.
+_PUBLICATION_WORDS = ("发布于", "发布", "公布于", "公布")
+_HOMEWORK_WORDS = ("作业", "习题", "练习", "编程作业", "实验报告", "problem set")
+_MATERIAL_WORDS = ("材料", "简历", "文档", "论文", "摘要", "申报书", "作品", "海报")
+_EVENT_WORDS_NEAR = ("举办", "举行", "召开", "活动时间", "会议时间", "讲座时间", "地点")
+_EVENT_WORDS_WEAK = ("开始",)
+_DEADLINE_WORDS = ("截止", "之前", "前完成", "deadline", "Deadline", "DEADLINE")
+_SUBMIT_WORDS = ("提交", "递交", "发送至", "发至")
 
 
 # ------------------------------------------------------------ time extraction
@@ -230,10 +215,6 @@ _DATE_PATTERNS = (
     # 11月13日 (no year) / 11月13日 15:00
     re.compile(r"(?P<m>\d{1,2})月(?P<d>\d{1,2})日(?:\s*(?P<h>\d{1,2}):(?P<mi>\d{2}))?"),
 )
-
-_REGISTRATION_WORDS = ("报名", "申请", "注册", "回执", "提交材料", "报名表")
-_EVENT_WORDS_NEAR = ("举办", "举行", "召开", "开始", "活动时间", "会议时间", "讲座时间", "地点")
-_DEADLINE_WORDS = ("截止", "之前", "前完成", "deadline", "Deadline", "DEADLINE")
 
 
 _CLAUSE_BREAKS = "。；！？!?\n，,"
@@ -260,37 +241,97 @@ def _clauses(text: str) -> list[tuple[int, int, str]]:
     return clauses
 
 
-def _kind_for_clauses(clauses: list[tuple[int, int, str]], match_start: int, match_end: int) -> str:
+def _kind_for_clauses(clauses: list[tuple[int, int, str]], match_start: int, match_end: int) -> str | None:
     """Classify a date by its own clause, extending only if that clause is mute.
 
     「报名截止2026年11月13日15:00，讲座将于2026年11月20日举行」 therefore yields
-    one 报名截止 and one 活动举办时间 instead of two registration dates. When no
-    clause in reach names anything, the value is kept but marked 待确认.
+    one 报名截止 and one 活动举办时间 instead of two registration dates. A date
+    whose clause carries no cue at all is **an ordinary mentioned date** and gets
+    ``None`` — the strict distinction requirement 3 asks for: only cued times
+    become deadlines.
+
+    Neighbouring clauses are consulted only when the date's own clause is mute,
+    and only for the *adjacent* clause inside the same sentence. A cue from any
+    other sentence is not evidence for this date: 「本通知发布于2026年11月1日。报名
+    截止11月30日」 must not turn the publication date into a deadline. When cues
+    half-match (a cue exists, but not enough to name the kind), the value is
+    kept but marked 待确认.
     """
-    def cues_in(piece: str) -> bool:
+    def publication_only(piece: str) -> bool:
+        """A published/announced date is a fact about the mail, not a deadline."""
         return (
-            any(w in piece for w in _REGISTRATION_WORDS)
-            or any(w in piece for w in _EVENT_WORDS_NEAR)
-            or any(w in piece for w in _DEADLINE_WORDS)
+            any(w in piece for w in _PUBLICATION_WORDS)
+            and not any(w in piece for w in _DEADLINE_WORDS)
+            and not any(w in piece for w in _SUBMIT_WORDS)
         )
+
+    def event_kind(piece: str, *, weak: bool) -> str | None:
+        """Event cues, the only ones strong enough to borrow from a neighbour.
+
+        「讲座将于11月20日举行」 keeps its meaning when 「讲座」 sits in the
+        previous clause. Registration, homework and material cues do not: a
+        deadline belongs to the clause that states it, so borrowing one from a
+        neighbour invents a deadline the date never had.
+        """
+        if any(w in piece for w in _DEADLINE_WORDS):
+            return None
+        if any(w in piece for w in _EVENT_WORDS_NEAR):
+            return EVENT_TIME
+        if weak and any(w in piece for w in _EVENT_WORDS_WEAK):
+            return EVENT_TIME
+        return None
+
+    def full_kind(piece: str, *, weak: bool) -> str | None:
+        if publication_only(piece):
+            return None
+        has_deadline = any(w in piece for w in _DEADLINE_WORDS)
+        submitted = any(w in piece for w in _SUBMIT_WORDS)
+        # 材料 / 作业 先于报名判断：「提交申请材料」属于材料提交，不是活动报名。
+        if any(w in piece for w in _MATERIAL_WORDS) and (has_deadline or submitted):
+            return MATERIAL_SUBMISSION_DEADLINE
+        if any(w in piece for w in _HOMEWORK_WORDS) and (has_deadline or submitted):
+            return HOMEWORK_DEADLINE
+        if any(w in piece for w in _REGISTRATION_WORDS):
+            return REGISTRATION_DEADLINE if has_deadline else UNCLEAR_TIME
+        if any(w in piece for w in _APPLICATION_WORDS):
+            return REGISTRATION_DEADLINE if has_deadline else UNCLEAR_TIME
+        event = event_kind(piece, weak=weak)
+        if event is not None:
+            return event
+        if has_deadline:
+            return TASK_DEADLINE
+        return None
 
     containing = [i for i, (s, e, _) in enumerate(clauses) if s <= match_start and match_end <= e]
     if not containing:
-        return UNCLEAR_TIME
+        return None
     index = containing[0]
 
-    for candidate in (index, index - 1, index + 1):
-        if 0 <= candidate < len(clauses) and cues_in(clauses[candidate][2]):
-            piece = clauses[candidate][2]
-            has_deadline = any(w in piece for w in _DEADLINE_WORDS)
-            if any(w in piece for w in _REGISTRATION_WORDS):
-                return REGISTRATION_DEADLINE if has_deadline else UNCLEAR_TIME
-            if any(w in piece for w in _EVENT_WORDS_NEAR) and not has_deadline:
-                return EVENT_TIME
-            if has_deadline:
-                return TASK_DEADLINE
-            return UNCLEAR_TIME
-    return UNCLEAR_TIME
+    # The date's own clause decides, strong cues first and weak ones (「开始」) after.
+    own = full_kind(clauses[index][2], weak=False)
+    if own is not None:
+        return own
+    weak_own = full_kind(clauses[index][2], weak=True)
+    if weak_own is not None:
+        return weak_own
+
+    # Otherwise borrow from the adjacent clause — but only within the same
+    # sentence, and only an event cue. A cue from another sentence is not
+    # evidence for this date: 「本通知发布于2026年11月1日。报名截止11月30日」 must
+    # not turn the publication date into a registration deadline.
+    def breaks_sentence(piece: str) -> bool:
+        return "\n" in piece or any(stop in piece for stop in "。！？!?；;")
+
+    for candidate in (index - 1, index + 1):
+        if not (0 <= candidate < len(clauses)):
+            continue
+        left, right = min(index, candidate), max(index, candidate)
+        if breaks_sentence(clauses[left][2]) or breaks_sentence(clauses[right][2]):
+            continue
+        borrowed = event_kind(clauses[candidate][2], weak=False)
+        if borrowed is not None:
+            return borrowed
+    return None
 
 
 def extract_email_deadlines(record: RawEmailRecord) -> tuple[EmailDeadline, ...]:
@@ -304,20 +345,43 @@ def extract_email_deadlines(record: RawEmailRecord) -> tuple[EmailDeadline, ...]
     text = f"{record.subject}\n{record.body_text}"
     clauses = _clauses(text)
     found: list[EmailDeadline] = []
-    seen: set[tuple[str, datetime | None, str]] = set()
+    # One date matches more than one pattern: 「2026年11月1日」 also contains
+    # 「11月1日」. A match that lies entirely inside a date already reported is
+    # the same fact, so it is skipped rather than listed twice.
+    reported_spans: list[tuple[int, int]] = []
+    seen: set[tuple[str, datetime | None, str, int]] = set()
 
     for pattern in _DATE_PATTERNS:
         for match in pattern.finditer(text):
+            if any(s <= match.start() and match.end() <= e for s, e in reported_spans):
+                continue
             groups = match.groupdict()
             year = groups.get("y")
             snippet_start = max(0, match.start() - 40)
             snippet_source = text[snippet_start:min(len(text), match.end() + SNIPPET_CHARS)].strip()
+            clause_index = next(
+                (i for i, (s, e, _) in enumerate(clauses)
+                 if s <= match.start() and match.end() <= e),
+                -1,
+            )
+            raw_text = match.group(0).strip()
 
             if year is None:
                 if record.sent_at is None:
+                    kind = _kind_for_clauses(clauses, match.start(), match.end())
+                    if kind is None:
+                        continue
+                    reported_spans.append((match.start(), match.end()))
+                    # No reference year: the month/day is kept for the user, but the
+                    # kind cannot be settled any more than the date can, so it stays
+                    # 待确认 rather than claiming an event date the mail never dated.
+                    key = (UNCLEAR_TIME, None, raw_text, clause_index)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     found.append(EmailDeadline(
                         kind=UNCLEAR_TIME, due_at=None,
-                        raw_text=match.group(0).strip(),
+                        raw_text=raw_text,
                         source_snippet=snippet_source, needs_confirmation=True,
                     ))
                     continue
@@ -334,26 +398,20 @@ def extract_email_deadlines(record: RawEmailRecord) -> tuple[EmailDeadline, ...]
             due = normalize_datetime(due)
 
             kind = _kind_for_clauses(clauses, match.start(), match.end())
-            key = (kind, due, match.group(0).strip())
+            if kind is None:
+                # An ordinary mentioned date: not a deadline, not待确认 — simply
+                # not promoted. The text itself stays in the body/snippet.
+                continue
+            reported_spans.append((match.start(), match.end()))
+            key = (kind, due, raw_text, clause_index)
             if key in seen:
                 continue
             seen.add(key)
             found.append(EmailDeadline(
                 kind=kind,
                 due_at=due,
-                raw_text=match.group(0).strip(),
+                raw_text=raw_text,
                 source_snippet=snippet_source,
                 needs_confirmation=(kind == UNCLEAR_TIME),
             ))
     return tuple(found)
-
-
-def analyze_email(record: RawEmailRecord) -> EmailAnalysis:
-    """One-call rule pass: category plus every explicit time the mail mentions."""
-    category, reason = classify_email(record)
-    return EmailAnalysis(
-        record=record,
-        category=category,
-        category_reason=reason,
-        deadlines=extract_email_deadlines(record),
-    )
