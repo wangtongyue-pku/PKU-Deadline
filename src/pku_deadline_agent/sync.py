@@ -62,23 +62,32 @@ class ImportFileError(ValueError):
 
 
 class Candidate:
-    """The shape the reviewed-import path and matcher expect for one task."""
+    """The shape the reviewed-import path and matcher expect for one task.
+
+    ``task_type`` is mapped from the platform's own wording. Another reader (the
+    stage 7 mail importer) uses this class too, so it may pass its own type mapper
+    and its own review notes instead of inheriting the programming-grid wording.
+    """
 
     __slots__ = ("title", "category", "task_type", "due_at", "deadline_changed",
                  "source_index", "review_notes", "deadline_text")
 
-    def __init__(self, record, source_index: int = 1):
-        local_type, unmapped = map_task_type(record.task_type)
+    def __init__(self, record, source_index: int = 1, *, task_type_mapper=None,
+                 notes=None):
+        if task_type_mapper is None:
+            local_type, unmapped = map_task_type(record.task_type)
+        else:
+            local_type, unmapped = task_type_mapper(record.task_type)
         self.title = record.task_title
         self.category = record.course
         self.task_type = local_type
         self.due_at = record.deadline
         self.deadline_changed = False
         self.source_index = source_index
-        notes = ["编程网格导入"]
+        base = ["编程网格导入"] if notes is None else list(notes)
         if unmapped:
-            notes.append(f"平台任务类型未映射：{unmapped}")
-        self.review_notes = tuple(notes)
+            base.append(f"平台任务类型未映射：{unmapped}")
+        self.review_notes = tuple(base)
         self.deadline_text = None
 
 
@@ -234,6 +243,26 @@ class SyncPlan:
 
 def plan_sync(records, result: FetchResult, repository, *, source="programming_grid") -> SyncPlan:
     """Compare platform records with local tasks. Never writes, never deletes."""
+    return plan_records(
+        records, result, repository, source=source,
+        new_reason="平台 ID 未出现在本地，作为新题集",
+        changed_reason="编程网格题集截止时间变化，经核对后更新",
+        unchanged_reason="平台 ID 已关联且截止时间一致",
+        duplicate_reason="未关联的平台 ID，但与 #{task_id}「{title}」可能重复：{detail}",
+        notes=("编程网格导入",),
+    )
+
+
+def plan_records(records, result, repository, *, source, new_reason,
+                 changed_reason, unchanged_reason, duplicate_reason,
+                 notes=None, task_type_mapper=None) -> SyncPlan:
+    """The shared planning core: link by source identity, never by title.
+
+    Stage 6 (programming grid) and stage 7D (mail) both import into the same task
+    table and must obey the same rules, so they share this code instead of each
+    keeping a copy that can drift. The wording differs because the user is being
+    told where the record came from; the decisions do not.
+    """
     if not result.trustworthy:
         # Refuse to build an actionable plan from a batch we cannot vouch for.
         result.require_trustworthy()
@@ -249,7 +278,10 @@ def plan_sync(records, result: FetchResult, repository, *, source="programming_g
 
     course = records[0].course if records else ""
     proposals, warnings = [], list(result.warnings)
-    candidates = [Candidate(record, index) for index, record in enumerate(records, start=1)]
+    candidates = [
+        Candidate(record, index, task_type_mapper=task_type_mapper, notes=notes)
+        for index, record in enumerate(records, start=1)
+    ]
     seen_keys: set[str] = set()
     for record, candidate in zip(records, candidates):
         key = external_key(record)
@@ -264,7 +296,7 @@ def plan_sync(records, result: FetchResult, repository, *, source="programming_g
             task = by_id[linked_id]
             if task.due_at == record.deadline:
                 proposals.append(SyncProposal(record, UNCHANGED, task.id, task.revision, task.due_at,
-                                              "平台 ID 已关联且截止时间一致", key))
+                                              unchanged_reason, key))
             else:
                 proposals.append(SyncProposal(record, DEADLINE_CHANGED, task.id, task.revision, task.due_at,
                                               _change_reason(task.due_at, record.deadline), key))
@@ -276,10 +308,12 @@ def plan_sync(records, result: FetchResult, repository, *, source="programming_g
         matches = _exact_title_matches(record, candidate, tasks, hashes, hashed)
         if matches:
             first = matches[0].task
+            detail = duplicate_reason.format(task_id=first.id, title=first.title,
+                                             detail=matches[0].reason)
             proposals.append(SyncProposal(record, POSSIBLE_DUPLICATE, first.id, first.revision, first.due_at,
-                                          f"未关联的平台 ID，但与 #{first.id}「{first.title}」可能重复：{matches[0].reason}", key))
+                                          detail, key))
         else:
-            proposals.append(SyncProposal(record, NEW, None, None, None, "平台 ID 未出现在本地，作为新题集", key))
+            proposals.append(SyncProposal(record, NEW, None, None, None, new_reason, key))
     return SyncPlan(source=source, course=course, proposals=tuple(proposals), rejections=tuple(result.rejections),
                     warnings=tuple(warnings), fetched_at=result.fetched_at, trustworthy=result.trustworthy)
 

@@ -123,6 +123,10 @@ def parse_raw_email(
         warnings.append(f"UID {uid}: 缺少 Message-ID，跨会话去重将依赖 UID。")
 
     sender = parseaddr(str(message.get("From") or ""))[1]
+    # The display name is kept separately: it is what the user recognises in the
+    # task list ("教务处" rather than "pku.edu.cn"), while the address itself is
+    # what identity and privacy rules work on.
+    sender_name = " ".join(parseaddr(str(message.get("From") or ""))[0].split())[:100]
     recipients = tuple(
         parseaddr(str(value or ""))[1]
         for value in (message.get("To"), message.get("Cc"))
@@ -172,6 +176,7 @@ def parse_raw_email(
         uidvalidity=uidvalidity,
         message_id=message_id,
         sender=sender,
+        sender_name=sender_name,
         recipients=recipients,
         subject=str(message.get("Subject") or "").strip(),
         sent_at=sent_at,

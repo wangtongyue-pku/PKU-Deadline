@@ -65,6 +65,11 @@ DEADLINE_KINDS = (
     UNCLEAR_TIME,
 )
 
+# A deadline cue with no date at all (「作业提交截止，日期待定」) yields 待确认时间 with
+# due_at=None. The date scanner cannot produce it — it only walks dates — so the
+# wording lives beside the kind, where the import layer can look for it too.
+TIME_MENTION_WORDS = ("截止", "deadline", "Deadline", "DEADLINE", "之前", "前完成", "报名")
+
 # ---------------------------------------------------------------- importance
 
 IMPORTANCE_HIGH = "高"
@@ -98,6 +103,7 @@ class RawEmailRecord:
     body_truncated: bool
     has_attachments: bool
     raw_size: int
+    sender_name: str = ""             # display name only; the address stays in sender
 
     @property
     def stable_key(self) -> str:
