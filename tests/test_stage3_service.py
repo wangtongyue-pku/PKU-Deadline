@@ -260,4 +260,4 @@ def test_v1_database_migration_preserves_old_tasks(tmp_path):
     repo.initialize()
     assert repo.list_tasks() == [original]
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4

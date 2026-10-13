@@ -223,7 +223,7 @@ def test_migration_backs_up_wal_and_preserves_all_original_columns(tmp_path):
     assert repo.get_task(7).title == "虚构旧任务"
     with sqlite3.connect(path) as current:
         assert current.execute("SELECT id,title,category,task_type,due_at,source,completed,created_at,updated_at FROM tasks").fetchall() == before
-        assert current.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert current.execute("PRAGMA user_version").fetchone()[0] == 4
     repo.initialize()
     assert len(list((tmp_path / "old.sqlite3.backups").glob("*.sqlite3"))) == 1
     source.close()

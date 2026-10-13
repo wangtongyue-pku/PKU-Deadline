@@ -13,7 +13,17 @@ from pku_deadline_agent.models import SOURCES, TASK_TYPES, Task
 from pku_deadline_agent.time_utils import beijing_now, normalize_datetime
 from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin, find_matches
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# The exact column list of the tasks table, in creation order. The v3 -> v4
+# migration copies rows through this list, so a future column addition must be
+# appended here too (the migration test would otherwise fail loudly).
+_TASK_COLUMNS = (
+    "id", "title", "category", "task_type", "due_at", "source", "completed",
+    "created_at", "updated_at", "revision", "deadline_revision", "deleted_at",
+)
+
+_SOURCE_VALUES = "'manual', 'wechat', 'teaching_platform', 'programming_grid', 'email'"
 
 
 class TaskConflict(ValueError):
@@ -66,13 +76,14 @@ class TaskRepository:
                     task_type TEXT NOT NULL CHECK(task_type IN ('作业', '考试', '活动报名', '其他')),
                     due_at TEXT,
                     source TEXT NOT NULL DEFAULT 'manual'
-                        CHECK(source IN ('manual', 'wechat', 'teaching_platform', 'programming_grid')),
+                        CHECK(source IN ('manual', 'wechat', 'teaching_platform', 'programming_grid', 'email')),
                     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
             """)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at)")
+            self._migrate_source_check(connection)
             # Additive v1 -> v2 migration, preserving every original task/column.
             connection.execute("""CREATE TABLE IF NOT EXISTS task_extractions (
                 task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
@@ -103,6 +114,53 @@ class TaskRepository:
                 updated_at TEXT NOT NULL, UNIQUE(task_id,deadline_revision,lead_seconds))""")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_reminder_state ON reminder_events(state)")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_source_check(self, connection) -> None:
+        """v3 -> v4: allow ``email`` as a task source.
+
+        The allowed values live in a CHECK constraint, and SQLite cannot alter a
+        constraint in place, so the table is rebuilt: create the new shape, copy
+        every row through an explicit column list, drop the old table, rename.
+
+        This runs inside the caller's transaction, which ``initialize`` opens
+        only after taking an online backup, so a failure rolls back and leaves the
+        previous table intact. The decision is made from the stored DDL, not from
+        the version number, so a database already carrying the new constraint is
+        left untouched instead of being copied for nothing.
+
+        Only columns that actually exist are copied: a v1/v2 database reaches this
+        point before the additive column migration has run, and demanding a column
+        it does not have yet would abort the upgrade of a real user's data.
+        """
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()
+        if ddl is None or "'email'" in (ddl[0] or ""):
+            return
+        present = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        columns = ", ".join(name for name in _TASK_COLUMNS if name in present)
+        if not columns:
+            raise RuntimeError("tasks 表没有任何已知列，已中止迁移而不是重建空表。")
+        connection.execute(f"""
+            CREATE TABLE tasks_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+                category TEXT NOT NULL DEFAULT '' CHECK(length(category) <= 100),
+                task_type TEXT NOT NULL CHECK(task_type IN ('作业', '考试', '活动报名', '其他')),
+                due_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ({_SOURCE_VALUES})),
+                completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
+                deadline_revision INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT
+            )
+        """)
+        connection.execute(f"INSERT INTO tasks_v4 ({columns}) SELECT {columns} FROM tasks")
+        connection.execute("DROP TABLE tasks")
+        connection.execute("ALTER TABLE tasks_v4 RENAME TO tasks")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at)")
 
     def backup(self) -> Path:
         """Create an independent, consistent snapshot; never overwrite a backup."""
