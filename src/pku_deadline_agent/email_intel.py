@@ -22,6 +22,7 @@ from pku_deadline_agent.email_models import (
     COURSE_ADMIN,
     EmailAnalysis,
     EmailDeadline,
+    EMAIL_CATEGORIES,
     EVENT_REGISTRATION,
     GENERAL_NEWS,
     IMPORTANCE_HIGH,
@@ -179,18 +180,37 @@ class ClassificationFeedback:
     predicted_category: str
     corrected_category: str
     note: str
+    predicted_importance: str = ""
+    corrected_importance: str = ""
     created_at: datetime = field(default_factory=beijing_now)
+
+    def __post_init__(self) -> None:
+        if self.corrected_category not in EMAIL_CATEGORIES:
+            raise ValueError(f"未知的邮件分类: {self.corrected_category!r}")
+        if self.corrected_importance and self.corrected_importance not in IMPORTANCE_LEVELS:
+            raise ValueError(f"未知的重要程度: {self.corrected_importance!r}")
+
+    @property
+    def is_noop(self) -> bool:
+        """True when neither field actually changed."""
+        return (self.predicted_category == self.corrected_category
+                and (not self.corrected_importance
+                     or self.predicted_importance == self.corrected_importance))
 
 
 class EmailFeedbackStore:
-    """In-memory correction log; persistence arrives with the 7D page."""
+    """Correction log for this process; the page reads it back to re-display mail.
+
+    Persistence is a separate concern (and a separate table); this store stays
+    the in-memory default so no correction is written anywhere by accident.
+    """
 
     def __init__(self) -> None:
         self._entries: list[ClassificationFeedback] = []
 
     def record(self, feedback: ClassificationFeedback) -> None:
-        if feedback.predicted_category == feedback.corrected_category:
-            raise ValueError("纠正后的分类与原分类相同，无需记录。")
+        if feedback.is_noop:
+            raise ValueError("纠正后的分类和重要程度都没有变化，无需记录。")
         self._entries.append(feedback)
 
     def all(self) -> tuple[ClassificationFeedback, ...]:
@@ -254,6 +274,98 @@ class DailyDigest:
         if self.incomplete:
             parts.append(f"待确认 {len(self.incomplete)} 封")
         return "；".join(parts) + "。"
+
+    @property
+    def entries(self) -> tuple[DigestEntry, ...]:
+        """Every message in the digest, deduplicated across sections.
+
+        A mail can sit in 「待确认」 *and* in 「优先阅读」 (it is both urgent and
+        incomplete), so the sections are not a partition; this view is, and it is
+        what a filter must operate on to avoid double-counting.
+        """
+        seen: dict[str, DigestEntry] = {}
+        for entry in (*self.priority_reads, *self.events, *self.incomplete, *self.rest):
+            seen.setdefault(entry.stable_key, entry)
+        return tuple(seen.values())
+
+
+# ------------------------------------------------------------------- filtering
+
+ALL_CATEGORIES = "全部"
+ALL_IMPORTANCE = "全部"
+ALL_TIME = "全部时间"
+TODAY_ONLY = "今天"
+LAST_3_DAYS = "近 3 天"
+LAST_7_DAYS = "近 7 天"
+TIME_WINDOWS = (TODAY_ONLY, LAST_3_DAYS, LAST_7_DAYS, ALL_TIME)
+
+_WINDOW_DAYS = {TODAY_ONLY: 0, LAST_3_DAYS: 2, LAST_7_DAYS: 6}
+
+
+@dataclass(frozen=True)
+class BoardFilters:
+    """What the board is currently showing. Defaults hide nothing."""
+
+    category: str = ALL_CATEGORIES
+    importance: str = ALL_IMPORTANCE
+    window: str = ALL_TIME
+    search: str = ""
+
+
+@dataclass(frozen=True)
+class BoardView:
+    """Filtered mail plus an honest count of what the filter left out.
+
+    A filter must never look like "there was no such mail": ``hidden`` says how
+    many matched messages are not on screen, so the user can widen the filter
+    instead of concluding the mail never arrived.
+    """
+
+    entries: tuple[DigestEntry, ...]
+    deadlines: tuple[DigestDeadline, ...]
+    total_before: int
+    hidden: int
+
+    @property
+    def all_hidden(self) -> bool:
+        return self.total_before > 0 and not self.entries
+
+
+def filter_digest(digest: DailyDigest, filters: BoardFilters, *,
+                  now: datetime | None = None) -> BoardView:
+    """Apply the user's filters to a digest without losing the total."""
+    now = normalize_to_beijing(now or beijing_now())
+    day = now.date()
+    search = filters.search.strip().casefold()
+
+    def matches_time(entry: DigestEntry) -> bool:
+        if filters.window == ALL_TIME:
+            return True
+        if entry.sent_at is None:
+            # An undated mail cannot be proven to fall inside the window, so it is
+            # kept rather than silently dropped by a time filter it cannot satisfy.
+            return True
+        days = _WINDOW_DAYS[filters.window]
+        return entry.sent_at.date() >= day - timedelta(days=days)
+
+    def matches(entry: DigestEntry) -> bool:
+        if filters.category not in (ALL_CATEGORIES, entry.category):
+            return False
+        if filters.importance not in (ALL_IMPORTANCE, entry.importance):
+            return False
+        if search and search not in f"{entry.subject}\n{entry.sender}".casefold():
+            return False
+        return matches_time(entry)
+
+    everything = digest.entries
+    kept = tuple(entry for entry in everything if matches(entry))
+    kept_keys = {entry.stable_key for entry in kept}
+    return BoardView(
+        entries=kept,
+        deadlines=tuple(item for item in digest.deadlines if item.stable_key in kept_keys),
+        total_before=len(everything),
+        hidden=len(everything) - len(kept),
+    )
 
 
 def _entry(analysis: EmailAnalysis, note: str = "") -> DigestEntry:

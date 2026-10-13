@@ -7,6 +7,7 @@ import streamlit as st
 
 from pku_deadline_agent.config import database_path
 from pku_deadline_agent.database import TaskRepository
+from pku_deadline_agent.email_page import render_email_page
 from pku_deadline_agent.grid_page import render_grid_import_page
 from pku_deadline_agent.models import TASK_TYPES
 from pku_deadline_agent.notice_page import render_notice_page
@@ -23,7 +24,8 @@ def main() -> None:
     st.caption("所有日期均为北京时间 Asia/Shanghai")
 
     with st.sidebar:
-        page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入", "提醒与备份"), key="page")
+        page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入",
+                                 "学校邮箱", "提醒与备份"), key="page")
         st.divider()
         with st.expander("这个程序做什么", expanded=False):
             st.write(
@@ -31,10 +33,13 @@ def main() -> None:
                 "不联网、不调用 AI（除非你在「Deadline 智能解析」里显式开启真实模型）。"
             )
             st.write("**可用**：手动添加与编辑、完成状态、回收站、重复核对、截止变更历史、"
-                     "独立本地提醒、微信通知导入、编程网格「一键同步」。")
-            st.write("**不在范围内**：教学网与 pku3b。**尚未实现**：每日定时同步（6C-3）。")
+                     "独立本地提醒、微信通知导入、编程网格「一键同步」、"
+                     "学校邮箱只读分类与 Deadline 导入。")
+            st.write("**不在范围内**：教学网与 pku3b。**尚未实现**：每日定时同步（6C-3）"
+                     "与邮箱后台自动同步。")
         with st.expander("安全边界", expanded=False):
             st.write("程序不读取你的密码：编程网格的登录在它自己打开的浏览器窗口里由你完成。")
+            st.write("学校邮箱只**只读**读取 INBOX；授权码默认只存在于本次运行的内存中，退出即失效。")
             st.write("不要把密码、Cookie、Token 或私人聊天原文填进任务里。")
             st.write("本程序没有登录认证，只监听本机 127.0.0.1，不要暴露到公网。")
 
@@ -67,6 +72,28 @@ def main() -> None:
         except (sqlite3.Error, OSError, RuntimeError):
             st.error("读取或写入本地数据库失败，请检查权限和可用空间。")
         return
+    if page == "学校邮箱":
+        repository = TaskRepository(database_path())
+        try:
+            repository.initialize()
+        except (sqlite3.Error, OSError, RuntimeError):
+            st.error("无法打开数据库：请检查本地文件权限、可用空间和程序版本。")
+            st.stop()
+        # Leaving the page drops the preview: nothing was written yet, and a stale
+        # plan must not be applied after the mail it came from is out of sight.
+        if st.session_state.get("_email_rendered") != page:
+            for key in ("email_plan", "email_rendered_plan", "email_generation"):
+                st.session_state.pop(key, None)
+        st.session_state["_email_rendered"] = page
+        try:
+            render_email_page(repository)
+        except (sqlite3.Error, OSError, RuntimeError):
+            st.error("读取或写入本地数据库失败，请检查权限和可用空间。")
+        return
+    if "_email_rendered" in st.session_state:
+        st.session_state.pop("_email_rendered", None)
+        for key in ("email_plan", "email_rendered_plan"):
+            st.session_state.pop(key, None)
     # Leaving review mode invalidates its preview/confirmation, retaining manual UI.
     if "notice_review" in st.session_state:
         st.session_state["notice_review"].preview = None
