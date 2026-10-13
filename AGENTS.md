@@ -46,7 +46,18 @@
 - `sources.py`：第五阶段平台无关适配器契约。统一字段 `source` / `course` / `task_title` / `task_type` / `published_at` / `deadline` / `source_url` / `source_id` / `status` / `last_updated`，加 `FetchResult` 与 `SourceCapabilities`、异常层级和注册表。空值保持为空，不编造；只接受带时区的 ISO 8601 并统一转北京时间；未声明增量能力时 `fetch(since=...)` 必须抛 `SourceUnsupported`，不得静默退化为全量；`external_key()` 只用「来源 + 平台对象标识」，与标题无关；契约中不得出现存放凭据的字段；本模块不得 import 任何可联网库。**结构损坏必须与「没有作业」严格区分**：无法解析的条目计入 `rejections`，无法确认是否有任务的条目计入 `warnings`，只有明确为空才是零记录。
 - **`complete` 与 `trustworthy` 不得混用（第五阶段两次评审的结论，第六阶段不变量）**：`complete` 仅表示「读到的条目都能转换」，**不是**数据完整的证明；`trustworthy` 才表示「整批都有交代」（无 rejection 且无 warning）；`confirmed_empty` 是「该来源确实没有任务」的**唯一**凭证。**破坏性决定（删除、取消、标记完成本地任务）必须先通过 `require_trustworthy()` / 检查 `trustworthy`；无法确认的课程必须保留既有本地任务**；「零记录 + `complete=True`」永远不足以推断「没有作业」。第六阶段同步层必须把这条写成独立测试，且不得被重构绕过。
 - `mock_sources.py`：第五阶段**离线**模拟适配器（教学网 / 编程网格形状），只用虚构数据与内存传输替身；不联网、不安装、不登录。`ProgrammingGridJsonAdapter` 的结构按 2026-10-11 真实响应编写，内容虚构。
-- `sync.py`：第六阶段 6A/6B 本地导入与差异计算。`load_grid_file` 只读文件并拒绝空 / 超大 / 非 UTF-8 / 非 JSON / 非对象输入；`plan_sync` **只读**，按平台 ID 判定 new / unchanged / deadline_changed / possible_duplicate，**不生成删除提案**；`apply_sync_plan` 经 `require_trustworthy()` 与第四阶段审核导入写库；`plan_from_fetch` 把多门课文档合成一个方案。
+- `sync.py`：第六阶段 6A/6B 本地导入与差异计算。`load_grid_file` 只读文件并拒绝空 / 超大 / 非 UTF-8 / 非 JSON / 非对象输入；`plan_sync` **只读**，按平台 ID 判定 new / unchanged / deadline_changed / possible_duplicate，**不生成删除提案**；`apply_sync_plan` 经 `require_trustworthy()` 与第四阶段审核导入写库；`plan_from_fetch` 把多门课文档合成一个方案。`plan_records` 是与第七阶段共用的规划核心（按来源定制措辞与任务类型映射），**两个来源必须共用它**，不得各自复制一份以免规则漂移。
+- `email_adapter.py`：第七阶段只读邮件适配器契约——**只有** `list_folders` / `fetch_since` / `fetch_uids` / `close`，契约层面不存在标记已读、删除、移动、发送的途径；`FORBIDDEN_IMAP_OPERATIONS` 供对照测试；`MockEmailAdapter` 离线假邮箱，记录全部操作。
+- `email_imap.py`：真实只读 IMAP。`select(readonly=True)`（EXAMINE）、`BODY.PEEK[]`（不置 `\Seen`）、无 STORE / EXPUNGE / APPEND / COPY 代码路径；失败四分类 `EmailAuthRequired` / `EmailNetworkError` / `EmailLayoutChanged` / 组件缺失，**任何一类都不得变成「没有邮件」**；空收件箱是正常干净结果；错误信息不含授权码。
+- `email_credentials.py`：`MailCredentials` 的 repr/str **永不含授权码**；`SessionCredentialStore` 是**默认**（仅进程内存，退出即失效）；`WindowsCredentialStore` **默认锁定**，未获用户确认持久化前构造即报错。
+- `email_parse.py`：MIME 解析（有界正文、HTML 取文本、字符集回退）与**时间语义**。只有带线索的日期才会成为 Deadline：「发布于 / 公布」是事实不是截止；线索**只借同句相邻子句**，且只借事件线索；被已报日期覆盖的匹配不重复上报；材料 / 作业线索**先于**报名判断（「提交申请材料」不是活动报名）。无参照年份时保留「待确认」。
+- `email_models.py`：邮件记录（含 `sender_name` 显示名，地址仍在 `sender`）、九类分类、六种 Deadline 类型、重要程度（`IMPORTANCE_LEVELS` **弱→强**，因为 `assess_importance` 用它做 `max()` 的排序键：把「高」写在前面会把 3 天内的邮件降级成「中」）、`TIME_MENTION_WORDS`（有线索但无日期时的兜底）。
+- `email_intel.py`：分类（每类都带理由，说不出理由进「待确认邮件」，不静默丢弃）、可解释的重要程度与行动项、每日情报摘要、`filter_digest`（筛选必须报告隐藏了几封）、`EmailFeedbackStore`、`build_ai_payload`（**闸门而非发送器**：未确认即抛 `PermissionError`，正文与附件结构上无法进入，隐私阻断的邮件整封剔除，本模块不发起任何网络调用）。
+- `email_sync.py`：初始 **INBOX 最近 7 天、≤30 封**，增量按 UID 游标，UIDVALIDITY 变化 → 显式警告 + 重置 + 重跑初始约束；解析失败的 UID **记录在状态里并自动重试**（一封坏邮件不阻塞其他邮件）；只产出报告，**不写任务**。
+- `email_import.py`：邮件 → 可审核方案。复用 `plan_records` / `apply_reviewed_tasks`（去重、revision、历史、提醒），**不生成删除**；身份是「邮件稳定标识 + 该邮件第几个日期」的哈希，同标题不同邮件**不合并**；活动举办时间**只展示、不自动建任务**；无日期的时间进「待确认」；正文截断的邮件**逐封跳过并记录 UID**，其他警告仍中止整批。
+- `email_demo.py`：第七阶段离线演示收件箱。日期**相对打开时刻生成**（否则「最近 7 天」窗口过几天就把演示掏空），基准归整到 09:00；每条邮件的多个日期必须**互不相同**且都在未来。
+- `email_page.py`：学校邮箱页面。演示模式为默认且不需要账号；真实模式的授权码只进会话内存，页面从不打印或落盘；「检查连接 / 同步邮件 / 断开连接」分离；离开页面丢弃未确认的预览；看板默认**不隐藏任何邮件**（默认时间范围是最宽的一档，隐藏数量必须显示出来）；widget key 代数按**方案内容签名**而非对象身份（对象每次 rerun 都会重建）。
+- **第七阶段（邮箱）不变量**：① 只读——不做自动登录、不保存密码、不自动重登、不批量抓取、不发送；② 授权码默认只在内存，绝不写进日志 / 数据库 / 交接文档；③ 写库前必经用户逐条确认，且走与编程网格同一条审核路径；④ 同步失败或读取异常**永不删除、取消或标记完成**任何已有本地任务；⑤ 真实 AI 调用仍只能经 `parse_service`，7D 页面**只准备载荷、不发送**；⑥ 首次真实邮箱连接属于 7E，需用户明确授权。
 - `grid_session.py`：第六阶段 6C-2 取数。`PlaywrightGridSession` 启动**本程序自己的浏览器窗口**（`detect_channel()` 默认选 Chrome、其次 Edge，驱动已安装的浏览器，不下载捆绑 Chromium），由用户在其中完成登录，程序**从不接触密码**，也不读取 Chrome/Edge 既有 profile 的数据。取数只读、只允许 `https://programming.pku.edu.cn/course/...`（`validate_traversal_url`）。失败分类必须保留：`SessionAuthRequired`（需重新登录）/ `SessionNetworkError`（网络或 5xx）/ `SessionLayoutChanged`（页面改版、非 JSON）/ `SessionBrowserUnavailable`（未安装可选依赖），**任何一类都不得变成「没有题集」**。`allow_real=True` 是强制门槛，测试与误调用无法启动真实浏览器；profile 落在已忽略的 `data/grid-session/<channel>/`；**不持久化密码**；登录过期只提示重登，**绝不自动重登**。**登录判定规则（2026-10-11 修复的缺陷，不得回退）**：只有在**检测到「已登录才会出现」的会话标记**时才认为已登录；**「不是登录页」不等于「已登录」**——旧实现用 `wait_for_url(不是登录页)`，结果 1 秒内就误判为未登录并关窗，用户根本来不及输密码。登录表单 URL 只认真正的表单地址（`/login`、`login.html`、`loginwithcaptcha`、`iaaa.pku.edu.cn`、`oauth.jsp`、`authcallback`），**门户根路径不算**。等待上限 `LOGIN_WAIT_SECONDS`（默认 300 秒）期间窗口保持打开；只有超时且仍在登录页才抛 `SessionAuthRequired`。
 - **一键同步不变量**：① 取数与写库分离，`fetch_courses` 只返回文档；② 任一课程失败（或会话失效）即整批中止，**不做部分导入**；③ 取到的数据仍要走 `plan_from_fetch` → `trustworthy` → 用户确认 → `apply_sync_plan`，与手动导入完全同一条路径；④ 页面「立即同步」按钮在未安装可选依赖时**禁用并说明原因**，手动导入始终可用；⑤ 该路径**不调用任何 AI**。
 - **第六阶段同步不变量（不得被重构绕过）**：① 抓取与写库分离，`plan_sync` 永不写库；② **响应里没出现的题集永不删除、取消或标记完成**，任务只能由用户手动删除；③ 不可信批次（有 rejections 或 warnings）**不能生成方案、不能写库**，不做部分导入；④ 同一响应内重复平台 ID **中止导入**；⑤ 平台 ID 是唯一合并依据，**标题相同但 ID 不同 = 两个任务**，标题相似绝不自动合并；⑥ 平台 ID 经 `notice_key()` 哈希后复用第四阶段已有的来源列，**因此不需要 schema 变更**；⑦ 未识别的平台任务类型落到「其他」并把原字符串记入 review_notes，不静默丢弃。
@@ -78,7 +89,7 @@
 
 第三阶段保持上述第二阶段界面 / 服务以兼容旧流程，另增独立解析入口。`ParseSession` 在预览前和执行前都调用同一 `filter_notices`，输入、模式、发布时间、配置（含密钥轮换 / 单价 / 上限）变化撤销旧确认与结果。第一次及后续真实调用均要求 `PKU_REAL_API_ENABLED=1` 和应用内对具体请求 / 提供方 / 费用的额外确认；Agent 未获明确同意不得设置真实开关或代勾真实确认。
 规则优先：结构化任务或明确课程作业模板可本地处理；页面自动提供时间基准，不花模型额度推断今天 / 今年。“周五”按参考时间所在日历周处理；未写年份的月日按参考年份，支持明确年份和今年 / 明年 / 后年 / 去年。已过去的日期仍是已知日期，提示可能过期，不顺延到下一年 / 下一周。历史通知提供了明确发布时间时，参考年份随其变化。复杂语义可交模型，但超出本地日期核验范围的时间仍待确认，UI 允许用户明确填写。Mock 仅演示候选 / 保存流程，不能宣称已验证真实模型识别质量。
-任务数据库 schema v3 保留原 tasks 和 task_extractions，增加 revision / deadline_revision / deleted_at 及历史、脱敏通知指纹、提醒配置 / 记录表。升级旧库前必须用 SQLite online backup 保存包含已提交 WAL 的一致性快照；失败禁止迁移，DDL 与 user_version 在同一事务内执行，失败回滚。不删除或重建用户任务库，也不自动清理旧快照。
+任务数据库 schema v4 保留原 tasks 和 task_extractions，增加 revision / deadline_revision / deleted_at 及历史、脱敏通知指纹、提醒配置 / 记录表；v4 只把 `tasks.source` 的 CHECK 约束扩充为允许 `email`（SQLite 不能原地改约束，故重建表，**只复制实际存在的列**，在备份之后同一事务内执行，按存储的 DDL 判断幂等）。升级旧库前必须用 SQLite online backup 保存包含已提交 WAL 的一致性快照；失败禁止迁移，DDL 与 user_version 在同一事务内执行，失败回滚。不删除或重建用户任务库，也不自动清理旧快照。
 
 第四阶段导入决策为 new / link / update / skip：重复只关联来源并保留任务字段；延期、提前、修正需核对原 / 新截止、目标编号及原因，单独最终确认后才更新。可能重复的独立新增也要用户明确选择。事务内重查匹配及目标 revision，旧确认不能覆盖其他页面的新修改；整批有错误回滚。导入更新保留原完成状态，清空已知截止额外提示确认。
 通知原文不新增落盘，使用经隐私过滤的必要片段 SHA-256 指纹和来源 / 时间；一条通知有多个任务时仍需区分任务名 / 类型 / 序号，不能只凭通知指纹合并。指纹不是匿名保证，仍属于本地私有数据。历史保存前后任务状态、原 / 新截止、原因、时间、来源 / 指纹，不补造升级前历史。
@@ -123,6 +134,9 @@
 | 4 | 编辑 / 删除 / 完成、去重、截止时间变更、Windows 提醒 | 重复和变更不能误覆盖；提醒去重、重启行为、手动模式离线可用 |
 | 5 | 教学网和编程网格可行性报告、适配器契约及模拟实现 | **已完成**（2026-10-11）：有来源与验证状态的方案比较、离线 Mock 适配器；**无自动登录、无真实同步、无新增依赖** |
 | 6 | 编程网格同步：6A/6B 本地导入链路、页面接线、6C 一键同步 | **6A/6B、页面接线与 6C-2 一键同步已完成，并已由用户真实登录联调成功**（本地导入 / 浏览器会话取数 → 差异预览 → 批量选择 → 确认写入 → 历史；146 项测试）；**6C-3 定时同步待授权** |
+| 7 | 学校邮箱智能管理：7A 研究 / 模型、7B 只读 IMAP、7C 分类与情报、7D 页面接入、7E 真实联调 | **7A–7D 已完成**：离线演示收件箱 + 只读 IMAP 适配器 + 分类 / 重要程度 / 每日情报 + 「学校邮箱」页面（连接、看板、Deadline 导入、反馈、AI 闸门）；**未登录任何真实邮箱、未发出任何 AI 请求**；**7E 真实联调需用户明确授权** |
+
+第七阶段的方案与边界见 `HANDOFF.md` 的 7A–7D 小节；邮箱端点与认证方式的研究记录见 `docs/stage7_email_research.md`（IMAP 主机经 DNS + TLS 验证，**未提供凭据、未读取任何数据**）。页面改动必须用 `scripts/email_preview.py` 起独立实例（虚构库 + 离线收件箱）在真实浏览器核对，**不要用你的真实邮箱做 UI 验证**。
 
 第六阶段的方案评估与同步架构见 `docs/stage6_sync_plan.md`。一键同步的可选依赖是 `playwright`（`pip install -e ".[browser]"`），用于驱动**已安装的浏览器**，**不下载捆绑 Chromium**；**安装前须经用户确认**。默认自动检测：**Chrome 优先**，其次 Edge；可用 `PKU_BROWSER_CHANNEL` 指定。两个浏览器**各自使用独立 profile**（`data/grid-session/<channel>/`），绝不共用、也不触碰用户日常浏览器的 User Data。定时同步推荐 Windows 任务计划程序 + 登录触发 + 到期检查，**不自动安装**，且不声称关机时仍能同步。
 
@@ -139,7 +153,7 @@ Windows 适配器只运行内置 PowerShell / Forms，不安装依赖。任务�
 6. Codex 和 DSH 遵循相同约束。交接文档不得包含真实账号、密钥、Cookie、Token 或聊天原文。
 7. 已有服务运行时，源码 / AppTest 通过不等于浏览器加载了新版。交付 UI 修改时验证实际本机页面；若仍显示旧版，核验启动路径和监听进程后重启本项目服务并刷新。重启会清除会话草稿和预览，不能删除已保存的数据库；不要只声称刷新就一定生效。
 
-前五阶段隐私网关、单次上传确认、默认北京时间 / 年份、模型切换和费用限额均须保持回归通过。第四阶段验收基线 406 项，第五阶段完成后 532 项，**第六阶段 6A/6B、页面接线、一键同步与界面改版完成后基线为 680 项**（406 + 128 + 146），详情见 HANDOFF。日常服务若依赖用户原 PowerShell 的 Key 环境，不读取密钥或擅自换成缺少 Key 的进程；可用独立虚构库验证新界面，再指导用户在原终端重启。
+前五阶段隐私网关、单次上传确认、默认北京时间 / 年份、模型切换和费用限额均须保持回归通过。验收基线：第四阶段 406 项、第五阶段完成后 532 项、**第六阶段完成后 680 项**、**第七阶段 7D 完成后全量 811 项通过**，详情见 HANDOFF。日常服务若依赖用户原 PowerShell 的 Key 环境，不读取密钥或擅自换成缺少 Key 的进程；可用独立虚构库验证新界面，再指导用户在原终端重启。
 
 ## 本机环境注意事项
 

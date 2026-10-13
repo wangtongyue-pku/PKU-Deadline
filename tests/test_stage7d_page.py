@@ -396,3 +396,40 @@ def test_demo_mode_is_the_default_so_no_account_is_needed(repo, monkeypatch):
     assert not any(item.type == "password" for item in app.text_input)
     combined = "\n".join(item.value for item in app.info)
     assert "不会访问任何网络或真实邮箱" in combined
+
+
+def test_demo_inbox_parses_cleanly_and_states_distinct_dates():
+    """The fixture itself must be sound, or the demo teaches the wrong thing.
+
+    Two properties matter and both were wrong once: no message may carry a
+    parsing warning, and a mail that states an event *and* its registration
+    deadline must state two different dates (they are not the same day, and a
+    demo that showed one date twice looked like a parser bug).
+    """
+    from pku_deadline_agent.email_adapter import DEFAULT_FOLDER
+    from pku_deadline_agent.email_intel import analyze_email
+    from pku_deadline_agent.email_parse import parse_raw_email
+    from pku_deadline_agent.email_demo import DEMO_SUBJECTS, demo_mailbox
+
+    mailbox = demo_mailbox()
+    assert len(mailbox._folders[DEFAULT_FOLDER]) == len(DEMO_SUBJECTS)
+    parsed = {}
+    for uid, raw in sorted(mailbox._folders[DEFAULT_FOLDER].items()):
+        record, warnings = parse_raw_email(raw, uid=uid, folder=DEFAULT_FOLDER, uidvalidity=1)
+        assert warnings == (), (record.subject, warnings)
+        parsed[record.subject] = analyze_email(record)
+
+    lecture = parsed["虚构学术讲座报名"]
+    dated = {item.kind: item.due_at for item in lecture.deadlines if item.due_at}
+    assert set(dated) == {"报名截止", "活动举办时间"}
+    assert dated["报名截止"] != dated["活动举办时间"]
+
+    # Every demo deadline is in the future of the demo clock, so the board shows
+    # live urgency rather than a pile of expired mail.
+    from pku_deadline_agent.email_demo import demo_now
+
+    now = demo_now()
+    for analysis in parsed.values():
+        for deadline in analysis.deadlines:
+            if deadline.due_at is not None:
+                assert deadline.due_at > now, (analysis.record.subject, deadline.kind)

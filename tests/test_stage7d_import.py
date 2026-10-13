@@ -4,7 +4,7 @@ The planner is the part that decides what the user is offered. Everything here
 runs on fictional mail: no network, no credentials, no mailbox.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from itertools import count
 
 import pytest
@@ -20,8 +20,7 @@ from pku_deadline_agent.email_import import (
     sender_label,
     task_title,
 )
-from pku_deadline_agent.email_intel import analyze_email
-from pku_deadline_agent.email_sync import EmailSyncReport, EmailSyncService
+from pku_deadline_agent.email_sync import EmailSyncService
 from pku_deadline_agent.database import SCHEMA_VERSION, TaskRepository
 from pku_deadline_agent.sync import DEADLINE_CHANGED, NEW, POSSIBLE_DUPLICATE, UNCHANGED
 from pku_deadline_agent.task_management import ImportDecision
@@ -266,12 +265,14 @@ def test_apply_with_all_skipped_writes_nothing(repo):
 
 
 def test_update_requires_a_reason(repo):
-    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    """An update must never be applied without the reason the page promises to collect."""
+    same = "<fictional-reason@pku.edu.cn>"
+    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。", message_id=same))))
     apply_email_plan(repo, first, default_decisions(first), confirmed=True)
     task = repo.list_tasks()[0]
 
-    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05。"))))
-    proposal = later.proposals[0]
+    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05。", message_id=same))))
+    assert kinds(later) == {DEADLINE_CHANGED}
     decisions = (ImportDecision("update", target_id=task.id,
                                 expected_revision=task.revision, reason="  "),)
     with pytest.raises(ValueError):
