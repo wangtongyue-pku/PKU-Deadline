@@ -1,5 +1,19 @@
 # Codex / DSH 交接记录
 
+## 第七阶段 7B：真实只读 IMAP 客户端 + 假服务器验证（DSH，2026-10-11）
+
+**配置已按北大官方文档纠正**（用户提供来源，抓取核实）：IMAP 服务器 = `imaphz.qiye.163.com:993` SSL；认证 = **校园网账号 + 客户端授权码**（`its.pku.edu.cn/about_8.jsp` 原文「邮箱已强制启用二次验证和客户端授权密码」）。7A 初版的 `imap.qiye.163.com` 与「普通密码」结论已被替换；研究报告第 2/3/6 节同步销账。`imaphz` 主机经 DNS + TLS 验证（CN=`*.qiye.163.com`，完整校验通过）。
+
+- **新增模块**：
+  - `email_credentials.py`：`MailCredentials`（repr/str 永不含授权码）；`SessionCredentialStore`（**默认**：仅当前进程内存，退出即失效）；`WindowsCredentialStore`（**默认锁定**——未获用户确认持久化前构造即报 PermissionError，错误信息写明权衡）；`read_credentials_interactively()`（getpass 不回显，供手动/7D 使用）。
+  - `email_imap.py`：`RealImapAdapter`——标准库 `imaplib`；`select(readonly=True)` 发出 **EXAMINE**；抓取用 **`BODY.PEEK[]`**（不置 `\Seen`）；无 STORE/EXPUNGE/APPEND/COPY 代码路径；错误四分类：`EmailAuthRequired`（登录被拒，提示核对授权码）/ `EmailNetworkError`（连不上/中断）/ `EmailLayoutChanged`（服务器应答异常）/ 空收件箱是**正常干净结果**；错误信息不含授权码；`connection_factory` 可注入（测试用明文 IMAP4 对本地假服务器，生产恒为 IMAP4_SSL）。
+  - `email_sync.py`：`EmailSyncService`（状态与连接分离）——初始同步 **7 天 + ≤30 封**（`SINCE` 服务端过滤，升序分页，`has_more` 提示续拉，不静默丢弃）；增量按 UID 游标；**UIDVALIDITY 变化 → 显式警告 + 重置游标 + 重跑初始约束**；每封过 `analyze_email` 产出 `EmailSyncReport`（分类计数、deadline 数、rejections、warnings、`trustworthy`）；**只产出报告，不写任务**——写库仍需用户确认（7D）。
+- **假 IMAP 服务器**（测试内）：线程化 TCP，实现 GREETING/CAPABILITY/LOGIN/LIST/EXAMINE/UID SEARCH（SINCE、UID n:* 含 RFC 最后一条 quirk）/UID FETCH 字面量/LOGOUT，记录全部收到的命令。
+- **测试**：新增 `tests/test_stage7_imap.py` **13 项**——线上只读验证（EXAMINE 有、SELECT 无、BODY.PEEK 有、LOGOUT 有、全程无 STORE/EXPUNGE/APPEND/COPY/DELETE/CREATE/RENAME）、初始 7 天+30 封约束（SINCE 日期核对、超期邮件不入批）、增量游标、UIDVALIDITY 重置、空收件箱、解析拒绝计数且游标越过、认证失败（且错误信息不含授权码）、网络错误、缺凭据时**连接前即停止**、凭据掩码与会话存储。
+- **边界**：全程未登录真实邮箱（假服务器在 127.0.0.1）；对 `imaphz.qiye.163.com:993` 仅做过无登录 TLS 握手。
+
+全量测试 **719 项通过**（406 + 128 + 146 + 26 + 13）。
+
 ## 第七阶段 7A：邮箱接入研究 + 数据模型 + 模拟测试（DSH，2026-10-11）
 
 用户启动第七阶段：北大学生邮箱（@stu.pku.edu.cn）智能管理。**7A 已完成，全部离线可验证；未进行任何真实邮箱登录。**

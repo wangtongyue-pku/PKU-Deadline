@@ -20,12 +20,16 @@ Verified endpoint facts (see docs/stage7_email_research.md):
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
-from pku_deadline_agent.email_models import EmailFetchResult
+from pku_deadline_agent.email_models import EmailFetchResult, RawEmailRecord
 
-# Verified against DNS and a live TLS handshake on 2026-10-11 (no login performed).
-IMAP_HOST = "imap.qiye.163.com"
+# Verified against PKU's own service documentation (its.pku.edu.cn/service_1_mail.jsp)
+# and a live TLS handshake on 2026-10-11 (no login performed). PKU's page names
+# imaphz.qiye.163.com explicitly for @stu.pku.edu.cn; the certificate (CN=*.qiye.163.com)
+# passes full hostname verification on that host.
+IMAP_HOST = "imaphz.qiye.163.com"
 IMAP_PORT = 993
 MAIL_DOMAIN = "stu.pku.edu.cn"
 WEBMAIL_URL = "https://mail.stu.pku.edu.cn/"
@@ -85,14 +89,21 @@ class EmailAdapter(Protocol):
         ...
 
     def fetch_since(
-        self, folder: str, since_uid: int, *, limit: int = DEFAULT_FETCH_LIMIT
+        self,
+        folder: str,
+        since_uid: int,
+        *,
+        limit: int = DEFAULT_FETCH_LIMIT,
+        since_date: "datetime | None" = None,
     ) -> EmailFetchResult:
         """Messages in ``folder`` with UID greater than ``since_uid``.
 
-        Returns an :class:`EmailFetchResult` in ascending UID order, including
-        per-message warnings and any parse rejections. Raises EmailAdapterError
-        subclasses on failure; never returns an empty batch as a way to signal
-        an error.
+        ``since_date`` (optional, server-side filter on arrival date) is used by
+        the initial constrained sync; incremental syncs pass only the UID
+        cursor. Returns an :class:`EmailFetchResult` in ascending UID order,
+        including per-message warnings and any parse rejections. Raises
+        EmailAdapterError subclasses on failure; never returns an empty batch as
+        a way to signal an error.
         """
         ...
 
@@ -126,14 +137,21 @@ class MockEmailAdapter:
         return names
 
     def fetch_since(
-        self, folder: str, since_uid: int, *, limit: int = DEFAULT_FETCH_LIMIT
-    ) -> "tuple[tuple[RawEmailRecord, ...], int, int, bool]":
+        self,
+        folder: str,
+        since_uid: int,
+        *,
+        limit: int = DEFAULT_FETCH_LIMIT,
+        since_date: datetime | None = None,
+    ) -> EmailFetchResult:
         self.operations.append("fetch_since")
         if self.closed:
             raise EmailAdapterError("会话已关闭。")
         if folder not in self._folders:
             raise EmailLayoutChanged(f"文件夹不存在: {folder!r}")
         # Import here to keep the import graph light and avoid cycles.
+        # ``since_date`` is a server-side arrival-date filter in the real
+        # adapter; the mock mailbox is tiny, so UID paging is what is exercised.
         from pku_deadline_agent.email_parse import parse_raw_email
 
         uids = sorted(uid for uid in self._folders[folder] if uid > since_uid)
