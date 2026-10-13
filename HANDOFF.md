@@ -1,5 +1,21 @@
 # Codex / DSH 交接记录
 
+## 第七阶段 7A：邮箱接入研究 + 数据模型 + 模拟测试（DSH，2026-10-11）
+
+用户启动第七阶段：北大学生邮箱（@stu.pku.edu.cn）智能管理。**7A 已完成，全部离线可验证；未进行任何真实邮箱登录。**
+
+- **研究结论**（含来源与验证状态，见 `docs/stage7_email_research.md`）：学生邮箱由网易企业邮箱托管（MX → `mxmail.netease.com`，登录页页脚「计算中心 + 网易」）；**采用 `imap.qiye.163.com:993` SSL**——完整 TLS 证书验证通过（CN=`*.qiye.163.com`）；域名专用主机 `imap.stu.pku.edu.cn` 存在但证书不含该主机名，直连需关闭校验，**不采用**。端口与「普通密码 + 完整邮箱地址」认证来自网易官方客户端文档。
+- **未验证清单**（研究文档第 6 节）：网页密码 vs 客户端授权码、IMAP 是否默认开启、连接数/频率限制数值、服务器能力、Junk 文件夹范围——7B 首次真实登录前逐项确认，**需用户先授权**。
+- **新增模块**（全部离线，无新依赖）：
+  - `email_models.py`：`RawEmailRecord`（uid + uidvalidity + Message-ID + 北京时间 + 有界正文 + 附件标记 + `stable_key`）、`EmailDeadline`（**报名截止 / 活动举办时间 / 任务截止 / 待确认时间** 四类，区分举办与报名）、`EmailAnalysis`、`EmailFetchResult`（rejections / warnings / `trustworthy`，沿用第五阶段纪律）。
+  - `email_adapter.py`：`EmailAdapter` Protocol **只有** `list_folders / fetch_since / close`——契约层面不存在标记已读/删除/移动/发送的途径；`FORBIDDEN_IMAP_OPERATIONS` 常量（STORE/EXPUNGE/APPEND/COPY…）供 7B 对照测试；`MockEmailAdapter` 离线假邮箱，操作留痕，增量按 UID，解析拒绝计入 rejections 且游标越过（防一封坏邮件永久卡死，同时 trustworthy=False 不伪装干净）。
+  - `email_parse.py`：标准库 `email` 解析 MIME（2 MB 原始上限、20 000 字符正文上限、HTML 只取文本、字符集三级回退）；规则分类（课程教务/活动报名/学术讲座/竞赛科研/重要通知/普通资讯/疑似垃圾）；**子句级**时间提取——按日期所在子句判定归属并向相邻子句就近扩展，解决「报名截止…，讲座将于…举行」被误归为一类的问题；无年份默认取邮件自身年份（与第三阶段纪律一致）；无参照时保持待确认，绝不猜测。
+- **测试**：新增 `tests/test_stage7_email.py` **26 项**——解析（时区换算/缺 Message-ID/缺 Date/无时区 Date/HTML 纯化/GBK 回退/附件隔离/超长截断/超大拒绝）、分类七类、提取（报名 vs 举办区分、斜杠日期、默认年份、待确认、2月30日跳过、naive 拒绝）、增量（只取新增/分页/拒绝不卡游标/警告破坏 trustworthy/空批是正常答案）、只读不变量（契约无变更方法、操作日志只含允许项、源码无禁止命令/无 smtplib/无 imaplib import）、不可信输入（含指令文字原样保存不执行）。
+- **边界**：未读取任何真实邮件；对 `imap.stu.pku.edu.cn:993` / `imap.qiye.163.com:993` 只做过**无登录**的 TLS 握手与证书身份检查（等同任何邮件客户端配置前的连通性检查，未提供凭据、未读取任何数据）。
+- **下一步**：7B 只读连接与增量获取（需 Windows 凭据存储实现 + 用户授权后首次真实连接）；7C 智能分类深化与每日摘要；7D 接入页面与看板。
+
+全量测试 **706 项通过**（406 + 128 + 146 + 26）。
+
 ## 当前阶段
 
 **第六阶段进行中（DSH）**：项目最终目标已由用户确定为**编程网格 Deadline 自动同步**；北大教学网与 pku3b **退出项目需求范围**（微信手动导入、隐私过滤、AI 解析、任务管理全部保留）。
