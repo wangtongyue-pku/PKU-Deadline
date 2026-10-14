@@ -60,7 +60,10 @@ class AISettings:
             if not self.enabled:
                 raise ValueError("真实调用尚未启用；请先明确授权并设置 PKU_REAL_API_ENABLED=1。")
             if not self.api_key or any(ord(char) < 33 or ord(char) > 126 for char in self.api_key):
-                raise ValueError("API Key 未配置或格式无效，请仅通过环境变量配置。")
+                raise ValueError(
+                    "API Key 未配置或格式无效：请在「AI 设置」页保存，或设置 "
+                    "PKU_DEEPSEEK_API_KEY / PKU_MIMO_API_KEY 环境变量。"
+                )
 
     def fingerprint(self) -> str:
         # Key rotations invalidate approvals without revealing the key.
@@ -69,7 +72,16 @@ class AISettings:
         return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
-def load_settings(provider: str, *, live: bool = False, model: str | None = None) -> AISettings:
+def load_settings(provider: str, *, live: bool = False, model: str | None = None,
+                  key_store=None) -> AISettings:
+    """Build settings for one provider.
+
+    ``key_store`` is only used in live mode: it resolves the API key, with the
+    environment variable taking priority over anything stored in the Windows
+    credential manager (stage 3 behaviour is therefore unchanged for an existing
+    setup). The key itself is never logged, returned in a message, or written
+    anywhere.
+    """
     if provider not in PROVIDERS:
         raise ValueError("不支持的提供方。")
     base, models = PROVIDERS[provider]
@@ -86,7 +98,7 @@ def load_settings(provider: str, *, live: bool = False, model: str | None = None
         raise ValueError("输出上限和超时必须是整数。") from None
     settings = AISettings(
         provider, selected, True, os.environ.get(prefix + "_BASE_URL", base).rstrip("/"),
-        os.environ.get(prefix + "_API_KEY", ""),
+        _resolve_api_key(provider, key_store),
         decimal_setting(os.environ.get(prefix + "_INPUT_PRICE", defaults[0]), "输入单价"),
         decimal_setting(os.environ.get(prefix + "_OUTPUT_PRICE", defaults[1]), "输出单价"),
         decimal_setting(os.environ.get("PKU_AI_DAILY_LIMIT_CNY", "1"), "每日上限"),
@@ -94,3 +106,12 @@ def load_settings(provider: str, *, live: bool = False, model: str | None = None
     )
     settings.validate()
     return settings
+
+
+def _resolve_api_key(provider: str, key_store) -> str:
+    """Environment variable first, then secure storage. Never raises for absence."""
+    if key_store is not None:
+        return key_store.resolve(provider)[0]
+    from pku_deadline_agent.api_key_store import ApiKeyStore
+
+    return ApiKeyStore().resolve(provider)[0]

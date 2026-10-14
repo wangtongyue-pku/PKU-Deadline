@@ -192,9 +192,28 @@ $env:PKU_DATABASE_PATH = 'D:\某个目录\practice.sqlite3'
 | `PKU_BROWSER_PROFILE` | 登录状态目录 |
 | `PKU_AI_DAILY_LIMIT_CNY` | 模型调用的每日人民币上限 |
 | `PKU_REAL_API_ENABLED` | 真实模型调用总开关（默认关闭） |
-| `PKU_DEEPSEEK_API_KEY` / `PKU_MIMO_API_KEY` | 模型密钥，**只从环境变量读** |
+| `PKU_DEEPSEEK_API_KEY` / `PKU_MIMO_API_KEY` | 模型密钥；也可在「AI 设置」页保存到 Windows 凭据管理器（环境变量优先） |
 
 `.env.example` 是配置模板，程序**不会**自动加载 `.env`。
+
+### 配置与保存 API Key
+
+打开侧边栏 **「AI 设置」**：
+
+- 顶部显示每个提供方是否已配置，以及**来源**（环境变量 / Windows 凭据管理器）——只显示状态，**永远不显示 Key**。
+- 选择提供方 → 在密码框粘贴 Key → 勾选确认 → 「保存到 Windows 凭据管理器」。DeepSeek 与 MiMo **分别管理**。
+- 删除需要额外勾选确认；删除只作用于凭据管理器，**不会动你的环境变量**。
+- 想存 Key 需要可选依赖 `keyring`（用 Windows 凭据管理器，不写明文文件）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[secrets]"
+```
+
+没装也能用——页面会说明原因并给出上面这条命令，此时用环境变量配置即可，功能不受影响。
+
+**读取顺序**：环境变量 → Windows 凭据管理器 → 视为未配置。环境变量优先级最高，所以你原有的配置方式（包括 `start.bat` 里继承的变量）完全不变，也不会被页面上保存的值覆盖。
+
+**边界**：Key 不写入 SQLite、配置文件、日志或交接文档；页面与错误信息都不回显 Key；凭据管理器以当前 Windows 账户加密（任何能以该账户运行的程序都能读取），数据库本身仍未加密。**保存 Key 不等于授权调用**：真实调用仍需 `PKU_REAL_API_ENABLED=1` 并在解析页逐次确认。
 
 用量账本 `data/ai_usage.sqlite3` 与任务库同目录，记录调用日期、提供方、tokens、单价和费用，**不保存密钥、通知或响应正文**。
 
@@ -212,7 +231,7 @@ $env:PKU_DATABASE_PATH = 'D:\某个目录\practice.sqlite3'
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-**811 项测试全部离线**，只用虚构数据和内存替身，不需要真实浏览器、网络或 API Key。
+**858 项测试全部离线**，只用虚构数据和内存替身，不需要真实浏览器、网络或 API Key。
 
 想看真实页面又不想碰你的数据，可以另开一个独立实例（用虚构数据库和离线演示收件箱）：
 
@@ -256,8 +275,10 @@ src/pku_deadline_agent/
   email_import.py             邮件 → 可审核的本地任务方案
   email_demo.py               离线演示收件箱（虚构邮件）
   email_page.py               学校邮箱页面
+  api_key_store.py            API Key 解析与 Windows 凭据管理器存储
+  ai_settings_page.py         AI 设置页面（保存 / 删除 Key）
 docs/                         可行性报告、同步方案与研究记录
-tests/                        811 项离线测试
+tests/                        858 项离线测试
 AGENTS.md                     开发约定（改代码前先读）
 HANDOFF.md                    进度与交接记录
 ```

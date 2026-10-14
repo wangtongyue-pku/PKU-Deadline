@@ -25,7 +25,7 @@ def main() -> None:
 
     with st.sidebar:
         page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入",
-                                 "学校邮箱", "提醒与备份"), key="page")
+                                 "学校邮箱", "AI 设置", "提醒与备份"), key="page")
         st.divider()
         with st.expander("这个程序做什么", expanded=False):
             st.write(
@@ -40,6 +40,8 @@ def main() -> None:
         with st.expander("安全边界", expanded=False):
             st.write("程序不读取你的密码：编程网格的登录在它自己打开的浏览器窗口里由你完成。")
             st.write("学校邮箱只**只读**读取 INBOX；授权码默认只存在于本次运行的内存中，退出即失效。")
+            st.write("API Key 可在「AI 设置」页保存到 **Windows 凭据管理器**，"
+                     "页面只显示是否已配置，不回显 Key。")
             st.write("不要把密码、Cookie、Token 或私人聊天原文填进任务里。")
             st.write("本程序没有登录认证，只监听本机 127.0.0.1，不要暴露到公网。")
 
@@ -89,6 +91,12 @@ def main() -> None:
             render_email_page(repository)
         except (sqlite3.Error, OSError, RuntimeError):
             st.error("读取或写入本地数据库失败，请检查权限和可用空间。")
+        return
+    if page == "AI 设置":
+        # No repository: this page manages a credential, not task data.
+        from pku_deadline_agent.ai_settings_page import render_ai_settings_page
+
+        render_ai_settings_page()
         return
     if "_email_rendered" in st.session_state:
         st.session_state.pop("_email_rendered", None)

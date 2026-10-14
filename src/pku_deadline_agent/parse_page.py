@@ -66,7 +66,9 @@ def render_parse_page():
     except ValueError as exc:
         invalidate_parse()
         st.error(str(exc))
-        st.info("密钥只通过环境变量配置，不要粘贴到通知或聊天。安全配置和首次测试步骤见 README；开发交付未进行真实调用。")
+        st.info("密钥可在「AI 设置」页保存到 Windows 凭据管理器，或用 PKU_DEEPSEEK_API_KEY / "
+                "PKU_MIMO_API_KEY 环境变量配置；不要粘贴到通知或聊天。安全配置和首次测试步骤见 README；"
+                "开发交付未进行真实调用。")
         return
     if live:
         st.write(f"上传目标：{settings.base_url}/chat/completions · 模型：{settings.model}")

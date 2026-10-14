@@ -17,6 +17,9 @@ dev = ["pytest>=8,<10"]
 # Optional: drives your already-installed Edge/Chrome for one-click sync.
 # Uses channel="msedge"/"chrome"; no bundled Chromium download is required.
 browser = ["playwright>=1.40,<2"]
+# Optional: stores API keys in the Windows Credential Manager instead of only in
+# environment variables. No plaintext file; the app works without it.
+secrets = ["keyring>=24,<26"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
