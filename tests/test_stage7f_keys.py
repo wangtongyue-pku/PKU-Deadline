@@ -228,6 +228,14 @@ def test_simulated_mode_never_reads_a_stored_key(fake_keyring, monkeypatch):
     assert fake_keyring.calls == []          # the credential manager was not queried
 
 
+def test_disabled_real_mode_never_queries_stored_keys(monkeypatch):
+    class NoRead:
+        def resolve(self, provider): raise AssertionError("disabled mode read a secret")
+    monkeypatch.delenv("PKU_REAL_API_ENABLED", raising=False)
+    with pytest.raises(ValueError, match="尚未启用"):
+        load_settings("DeepSeek", live=True, key_store=NoRead())
+
+
 def test_settings_repr_and_fingerprint_never_expose_the_key(fake_keyring):
     settings = AISettings("DeepSeek", "deepseek-flash", True, "https://api.deepseek.com",
                           FAKE_DEEPSEEK, Decimal("2"), Decimal("8"), Decimal("1"))

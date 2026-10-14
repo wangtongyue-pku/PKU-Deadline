@@ -1,21 +1,8 @@
-"""Stage 7D: the school-mailbox page (connection, intelligence board, import).
+"""Real mailbox UI, secure persistence and in-page AI through ParseSession.
 
-Design rules this page follows, all of them already enforced by the layers below:
-
-* the page itself never talks IMAP. It delegates to ``EmailSyncService`` (which
-  owns the sync state) and only ever displays what came back;
-* nothing is written to the task database until the user confirms a reviewed
-  plan; a batch that is not trustworthy cannot even become a plan;
-* an activity time (活动举办时间) is shown, never auto-imported, and a time without
-  a date (待确认时间) is shown for manual entry;
-* real credentials are optional and in-memory by default. The page ships an
-  offline demo mailbox so the whole flow is usable and reviewable without any
-  account, and it never writes a password or a code into logs.
-
-The AI section is a **gate, not a sender**: it prepares the minimal payload,
-shows it, and refuses to run unless the user confirms that exact batch. Dispatch
-stays in the existing parse service, which is where the real per-call
-authorisation and the usage budget live.
+Background sync updates only the encrypted mailbox cache. Task writes require a
+save click; model requests require their displayed privacy preview approval.
+Offline fixtures are injected by tests/preview scripts, never a product option.
 """
 
 from __future__ import annotations
@@ -35,7 +22,9 @@ from pku_deadline_agent.email_adapter import (
     EmailLayoutChanged,
     EmailNetworkError,
 )
-from pku_deadline_agent.email_credentials import MailCredentials, SessionCredentialStore
+from pku_deadline_agent.email_credentials import MailCredentials, SessionCredentialStore, WindowsCredentialStore
+from pku_deadline_agent.mailbox_cache import MailboxCache, account_key, sync_mailbox
+from pku_deadline_agent.email_schedule import cache_path, WindowsMailSchedule
 from pku_deadline_agent.email_demo import demo_mailbox
 from pku_deadline_agent.email_import import apply_email_plan, plan_email_import
 from pku_deadline_agent.email_intel import (
@@ -95,6 +84,7 @@ class EmailPageDependencies:
     credentials: object              # CredentialStore
     state_store: object              # MailboxStateStore
     label: str
+    cache: object = None
 
 
 # ------------------------------------------------------------------ demo mail
@@ -112,10 +102,14 @@ def build_dependencies(mode: str, *, state_store=None) -> EmailPageDependencies:
     if state_store is None:
         state_store = MailboxStateStore()
         st.session_state["email_state_store"] = state_store
+    # Internal injection for offline tests/preview scripts, never a user option.
+    override = st.session_state.get(DEMO_FACTORY_KEY)
+    if override is not None:
+        return EmailPageDependencies(MODE_DEMO, override, st.session_state.get("email_credentials") or SessionCredentialStore(), state_store, "虚构测试邮箱")
     if mode == MODE_REAL:
         credentials = st.session_state.get("email_credentials")
         if credentials is None:
-            credentials = SessionCredentialStore()
+            credentials = WindowsCredentialStore(user_confirmed_persistence=True)
             st.session_state["email_credentials"] = credentials
         return EmailPageDependencies(
             mode=mode,
@@ -125,6 +119,7 @@ def build_dependencies(mode: str, *, state_store=None) -> EmailPageDependencies:
             credentials=credentials,
             state_store=state_store,
             label=f"{IMAP_HOST}:{IMAP_PORT}（只读）",
+            cache=MailboxCache(cache_path()),
         )
     # Demo branch only: an override lets tests (and future previews) supply a
     # different offline mailbox without reaching into module globals, which
@@ -142,17 +137,28 @@ def build_dependencies(mode: str, *, state_store=None) -> EmailPageDependencies:
 # ------------------------------------------------------------------- rendering
 
 
-def render_email_page(repository, *, mode: str = MODE_DEMO,
+@st.fragment(run_every="60s")
+def render_email_page(repository, *, mode: str = MODE_REAL,
                       dependencies: EmailPageDependencies | None = None) -> None:
     st.subheader("学校邮箱")
     st.caption("只读读取你学校邮箱的 INBOX；不发送、不标记已读、不删除、不移动任何邮件。")
 
     _render_pending_messages()
-    mode = st.radio("读取方式", (MODE_DEMO, MODE_REAL), index=0,
-                    key="email_mode", horizontal=True,
-                    help="演示模式使用离线虚构邮件；真实模式需要用你的校园网账号与客户端授权码。")
     if dependencies is None:
         dependencies = build_dependencies(mode)
+    if dependencies.cache is not None:
+        credentials = dependencies.credentials.get()
+        if credentials:
+            account = account_key(credentials.address)
+            info = dependencies.cache.info(account)
+            cache_version = (account, info["last_success"])
+            if st.session_state.get("email_cache_version") != cache_version:
+                report, _ = dependencies.cache.load(account)
+                st.session_state["email_cache_version"] = cache_version
+                st.session_state["email_report"] = report
+                st.session_state["email_last_sync"] = datetime.fromisoformat(info["last_success"]) if info["last_success"] else None
+                st.session_state.pop("email_plan", None)
+                st.session_state.pop("email_digest", None)
     _render_connection(repository, dependencies)
     return dependencies
 
@@ -186,7 +192,9 @@ def _current_report() -> EmailSyncReport | None:
 def _reset_sync_state(dependencies: EmailPageDependencies) -> None:
     for key in ("email_report", "email_plan", "email_last_sync", "email_error",
                 "email_info", "email_written", "email_digest", "email_digest_key",
-                "email_generation", "email_plan_signature", "email_rendered_plan"):
+                "email_generation", "email_plan_signature", "email_rendered_plan",
+                "email_ai_session", "email_ai_input", "email_ai_selection_signature",
+                "email_ai_selection", "email_cache_version"):
         st.session_state.pop(key, None)
     dependencies.state_store.reset(DEFAULT_FOLDER)
     # Drop the state object itself too: after a disconnect nothing about the
@@ -198,9 +206,7 @@ def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
     st.markdown("### 邮箱连接")
 
     if dependencies.mode == MODE_REAL:
-        _render_credentials(dependencies)
-    else:
-        st.info(f"当前为{dependencies.mode}：读取内置的虚构邮件，不会访问任何网络或真实邮箱。")
+        _render_credentials(dependencies, repository)
 
     _render_status(dependencies)
 
@@ -209,18 +215,20 @@ def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
         _check_connection(dependencies)
     if columns[1].button("同步邮件", type="primary", key="email_sync"):
         _run_sync(repository, dependencies)
-    if columns[2].button("断开连接", key="email_disconnect"):
+    if columns[2].button("暂停连接", key="email_disconnect"):
         _disconnect(dependencies)
     columns[3].caption(f"常规范围：INBOX 最近 {INITIAL_DAYS} 天、最多 {INITIAL_MAX} 封"
                        f"（单批硬上限 {DEFAULT_FETCH_LIMIT} 封）")
 
+    if dependencies.cache is not None:
+        _render_automation(repository, dependencies)
     _render_bounded_sync(repository, dependencies)
 
     with st.expander("这个功能会做什么、不会做什么", expanded=False):
         st.write("- **只读**：只列出文件夹、按 UID 读取邮件内容（`BODY.PEEK`），"
                  "不会标记已读、移动、删除或发送。")
-        st.write("- **不保存密码**：默认只在当前程序运行期间保留授权码，退出即失效。")
-        st.write("- **不自动重登**：登录过期只会提示你重新输入，不会自动尝试。")
+        st.write("- **安全保存**：授权码保存在当前 Windows 账户的凭据管理器，不保存网页登录密码。")
+        st.write("- **授权失效**：停止自动检查，提示你更新授权码，不反复尝试登录。")
         st.write("- **写库前必经你确认**：同步只生成方案；确认后才会写入本地任务。")
         st.write("- **不会删除任务**：邮件里没出现的本地任务不会被删除、取消或标记完成。")
 
@@ -230,7 +238,7 @@ def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
         _render_rules()
         return
 
-    _render_report_summary(report)
+    _render_report_summary(report, repository)
     plan = st.session_state.get("email_plan")
     if plan is None:
         try:
@@ -275,26 +283,45 @@ def _render_bounded_sync(repository, dependencies: EmailPageDependencies) -> Non
                   kwargs={"window_hours": float(hours), "max_messages": int(cap)})
 
 
-def _render_credentials(dependencies: EmailPageDependencies) -> None:
-    with st.form("email_credentials_form", clear_on_submit=True):
-        st.caption("用于只读 IMAP 的是**客户端授权码**，不是网页登录密码；"
-                   "授权码只在内存中，不会写入日志、数据库或交接文档。")
-        address = st.text_input("校园网邮箱地址", key="email_address",
-                                placeholder="例如 pkuid@stu.pku.edu.cn")
-        code = st.text_input("客户端授权码", key="email_code", type="password")
-        acknowledged = st.checkbox("我了解：本程序只会只读读取 INBOX，不会发送、删除或标记邮件",
-                                   key="email_ack")
-        submitted = st.form_submit_button("保存到本次运行（仅内存）")
+def _render_credentials(dependencies: EmailPageDependencies, repository) -> None:
+    saved = dependencies.credentials.get()
+    if st.session_state.pop("email_clear_code", False):
+        st.session_state["email_code"] = ""
+    with st.expander("邮箱设置" if saved else "首次连接：填写一次即可", expanded=saved is None):
+        st.caption("使用客户端授权码，不能填网页登录密码。保存到 Windows 凭据管理器后，重启仍可使用；同一 Windows 账户下的程序可能读取它。")
+        address = st.text_input("校园网邮箱地址", value=saved.address if saved else "", key="email_address", placeholder="例如 pkuid@stu.pku.edu.cn")
+        code = st.text_input("客户端授权码", key="email_code", type="password", help="已保存的授权码不会回填。更新时再填写。")
+        st.caption("保存时同时开启每天自动检查：只读 INBOX，首次最近 7 天最多 30 封；后台不上传 AI。邮件看板以当前 Windows 账户加密缓存，最多 200 封 / 30 天。")
+        submitted = st.button("保存邮箱并开启每天检查", key="email_credentials_save")
+        forget = st.button("忘记此邮箱", key="email_forget", disabled=saved is None)
+        if forget:
+            _disconnect(dependencies)
+            dependencies.credentials.clear()
+            st.session_state["email_clear_code"] = True
+            st.rerun()
     if submitted:
-        if not acknowledged:
-            st.warning("请先确认上面的说明，再保存凭据。")
-            return
         if not address.strip() or not code:
             st.error("邮箱地址和客户端授权码都不能为空。")
             return
-        dependencies.credentials.save(
-            MailCredentials(address=address.strip(), authorization_code=code))
-        _remember("email_info", "凭据已保存到本次运行的内存中；程序退出后即失效。")
+        try:
+            # Replacing an account must disable its schedule, preserve its cache
+            # and revoke every in-memory plan before using the new identity.
+            if saved and dependencies.cache:
+                dependencies.cache.configure(account_key(saved.address), enabled=False)
+            dependencies.credentials.save(MailCredentials(address=address.strip().lower(), authorization_code=code))
+        except (ValueError, RuntimeError) as error:
+            st.error(str(error))
+            return
+        _reset_sync_state(dependencies)
+        st.session_state["email_clear_code"] = True
+        _remember("email_info", "邮箱已保存到 Windows 凭据管理器，重启后无需重填。")
+        if dependencies.cache is not None:
+            try:
+                WindowsMailSchedule(task_path=repository.path).enable()
+                dependencies.cache.configure(account_key(address), enabled=True)
+            except RuntimeError:
+                _remember("email_error", "邮箱凭据已保存，但自动检查未能启用。请在「自动检查邮箱」中重试；仍可手动同步。")
+        st.rerun()
 
 
 def _render_status(dependencies: EmailPageDependencies) -> None:
@@ -302,7 +329,7 @@ def _render_status(dependencies: EmailPageDependencies) -> None:
     connected = bool(st.session_state.get("email_connected"))
     credentials = dependencies.credentials.get()
     if dependencies.mode == MODE_REAL:
-        state = "已保存凭据（内存）" if credentials is not None else "未提供凭据"
+        state = "已保存（Windows 凭据管理器）" if credentials is not None else "未提供凭据"
     else:
         state = "演示收件箱"
     columns = st.columns(4)
@@ -341,7 +368,7 @@ def _check_connection(dependencies: EmailPageDependencies) -> None:
     except EmailNetworkError as error:
         st.session_state["email_connected"] = False
         _remember("email_error",
-                  f"网络或服务端问题：{error} 演示模式下可以改用「演示模式」先在本地试用。")
+                  f"网络或服务端问题：{error} 保留上次结果，请稍后重试。")
         return
     except EmailLayoutChanged as error:
         st.session_state["email_connected"] = False
@@ -363,14 +390,21 @@ def _run_sync(repository, dependencies: EmailPageDependencies, *,
               max_messages: int | None = None) -> None:
     st.session_state.pop("email_error", None)
     if dependencies.mode == MODE_REAL and dependencies.credentials.get() is None:
-        _remember("email_error", "请先在上方保存邮箱地址与客户端授权码（仅保存在本次运行内存中）。")
+        _remember("email_error", "请先在上方保存邮箱地址与客户端授权码。")
         return
     service = _service(dependencies)
     scope = (f"最近 {int(window_hours)} 小时、最多 {max_messages} 封"
              if window_hours else "按常规范围")
     try:
         with st.spinner(f"正在只读读取邮件（{scope}）…"):
-            report = service.sync(window_hours=window_hours, max_messages=max_messages)
+            credentials = dependencies.credentials.get()
+            if dependencies.cache is not None and window_hours is None:
+                report = sync_mailbox(dependencies.cache, credentials, dependencies.adapter_factory, force=True)
+                if report is None:
+                    _remember("email_info", "邮箱正在检查，请稍后刷新。")
+                    return
+            else:
+                report = service.sync(window_hours=window_hours, max_messages=max_messages)
     except EmailAuthRequired as error:
         _remember("email_error", f"登录被拒绝：{error} 请核对授权码，或确认邮箱已开启 IMAP。")
         return
@@ -386,6 +420,9 @@ def _run_sync(repository, dependencies: EmailPageDependencies, *,
     except OSError as error:
         _remember("email_error", f"读取邮件时出错（{error.__class__.__name__}），未改动任何本地任务。")
         return
+    except RuntimeError as error:
+        _remember("email_error", str(error))
+        return
 
     st.session_state["email_connected"] = True
     st.session_state["email_report"] = report
@@ -398,14 +435,16 @@ def _run_sync(repository, dependencies: EmailPageDependencies, *,
 
 
 def _disconnect(dependencies: EmailPageDependencies) -> None:
-    dependencies.credentials.clear()
+    credentials = dependencies.credentials.get()
+    if credentials and dependencies.cache is not None:
+        dependencies.cache.configure(account_key(credentials.address), enabled=False)
     _reset_sync_state(dependencies)
     st.session_state["email_connected"] = False
     st.session_state.pop("email_feedback", None)
-    _remember("email_info", "已断开：凭据、同步结果与预览都已从本次运行中清除；本地任务未受影响。")
+    _remember("email_info", "自动检查已暂停，未确认预览已清除；已保存授权码和本地任务保留。要移除授权码请点「忘记此邮箱」。")
 
 
-def _render_report_summary(report: EmailSyncReport) -> None:
+def _render_report_summary(report: EmailSyncReport, repository) -> None:
     st.divider()
     digest = st.session_state.get("email_digest")
     if digest is None or st.session_state.get("email_digest_key") != id(report):
@@ -416,9 +455,10 @@ def _render_report_summary(report: EmailSyncReport) -> None:
     st.write(digest.summary_line())
     _render_board(report, digest)
     st.divider()
-    _render_feedback(report)
+    with st.expander("反馈与修正", expanded=False):
+        _render_feedback(report)
     st.divider()
-    _render_ai_gate(report)
+    _render_ai_gate(report, repository)
 
 
 def _render_board(report: EmailSyncReport, digest) -> None:
@@ -526,7 +566,7 @@ def _render_plan(repository, report: EmailSyncReport, plan) -> None:
                 continue
             if proposal.kind == DEADLINE_CHANGED:
                 reason = st.text_input(
-                    "修改原因（必填，1–500 字）", key=f"email_reason_{generation}_{index}")
+                    "修改原因（必填，1–500 字）", value="邮件通知明确修改截止时间", key=f"email_reason_{generation}_{index}")
                 st.caption(f"将把 #{proposal.task_id} 从 {format_deadline(proposal.current_deadline)}"
                            f" 改为 {format_deadline(proposal.record.deadline)}")
                 decisions.append(ImportDecision("update", target_id=proposal.task_id,
@@ -539,9 +579,8 @@ def _render_plan(repository, report: EmailSyncReport, plan) -> None:
             else:
                 decisions.append(ImportDecision("new", allow_distinct=True,
                                                 reason="经页面核对后从学校邮箱导入"))
-        confirmed = st.checkbox("我已核对以上内容，确认按所选写入本地任务库",
-                                key=f"email_confirm_{generation}")
-        if st.button("执行导入", type="primary", disabled=not confirmed,
+        st.caption("点击保存即确认当前选择；未选中的改期和冲突不会更新。")
+        if st.button("保存所选 Deadline", type="primary",
                      key=f"email_apply_{generation}"):
             _apply_plan(repository, plan, decisions)
 
@@ -682,37 +721,86 @@ def _render_feedback(report: EmailSyncReport) -> None:
 # --------------------------------------------------------------------- AI gate
 
 
-def _render_ai_gate(report: EmailSyncReport) -> None:
-    st.markdown("### AI 辅助（可选，默认不发送）")
-    st.caption("本地规则先给出结论；只有在你看过完整预览并逐次确认后，才会考虑让模型参与。"
-               "本页目前**只准备载荷、不发送**：真正的调用要走「Deadline 智能解析」页的"
-               "同一个网关（含费用与逐次授权）。")
-    try:
-        payload = build_ai_payload(report.analyses, confirmed=True)
-    except Exception as error:
-        st.error(f"无法准备 AI 载荷：{error}")
+def _render_ai_gate(report: EmailSyncReport, repository) -> None:
+    from pku_deadline_agent.email_ai import prepare_email_input
+    from pku_deadline_agent.parse_controls import render_settings, local_settings, render_preview, render_results
+    from pku_deadline_agent.parse_service import ParseSession
+    st.markdown("### AI 智能提取邮件")
+    enabled = st.toggle("使用 AI 辅助提取", key="email_use_ai")
+    if not enabled:
+        st.session_state.pop("email_ai_session", None)
+        st.session_state.pop("email_ai_input", None)
         return
-    st.write(f"可参与的最小载荷：{len(payload.items)} / {len(report.analyses)} 封"
-             f"（其余因含敏感内容被整体剔除）。")
-    st.caption("载荷只包含：主题、发件域名、本地规则结论、已提取的时间片段。"
-               "**正文与附件不在其中**，也不会上传邮件全文或认证凭据。")
-    if payload.items:
-        with st.expander("查看将发送的最小载荷（逐字段）", expanded=False):
-            for item in payload.items:
-                st.write(f"- 主题：{item.subject}")
-                st.write(f"  发件域名：{item.sender_domain}")
-                st.write(f"  本地结论：{item.category}")
-                st.write(f"  时间片段：{'；'.join(item.deadlines) or '（无）'}")
-                st.write(f"  片段：{item.snippet or '（无）'}")
-                if item.privacy_kinds:
-                    st.caption(f"  已脱敏类型：{'、'.join(item.privacy_kinds)}")
-    confirmed = st.checkbox(
-        "我确认上述内容可以交给模型辅助（仍需在解析页对具体请求再次确认）",
-        key="email_ai_confirm",
-    )
-    st.button("准备好载荷（本页不发送）", disabled=not confirmed, key="email_ai_prepare")
-    if not confirmed:
-        st.info("未确认前，程序不会构建任何对外请求；邮件全文与附件永远不进入载荷。")
+    st.caption("无需复制到其他页面。先在本地筛选主题和正文中的任务片段，移除联系方式；不上传附件或邮件头。只有点击预览下方的发送按钮才调用模型。")
+    settings, provider, model = render_settings("email_ai")
+    effective = settings or local_settings(provider, model)
+    choices = {f"UID {item.record.uid} · {item.record.subject}": item for item in report.analyses}
+    picked = st.multiselect("选择需要智能提取的邮件", tuple(choices), key="email_ai_selection", max_selections=20)
+    selected = tuple(choices[label] for label in picked)
+    session = st.session_state.get("email_ai_session")
+    if not isinstance(session, ParseSession):
+        session = st.session_state["email_ai_session"] = ParseSession()
+    if not report.trustworthy:
+        session.invalidate()
+        st.session_state.pop("email_ai_input", None)
+        st.warning("邮箱本批读取存在未核对问题，已撤销 AI 预览；先完成只读同步核对。")
+        return
+    signature = tuple((item.record.stable_key, item.record.subject, item.record.body_text, item.record.sent_at) for item in selected)
+    context = st.session_state.get("email_ai_input")
+    if st.session_state.get("email_ai_selection_signature") != signature:
+        session.invalidate()
+        st.session_state.pop("email_ai_input", None)
+        st.session_state["email_ai_selection_signature"] = signature
+        context = None
+    if context:
+        session.observe(context.raw, context.reference, "natural", effective)
+    if st.button("智能提取所选邮件", key="email_ai_prepare", disabled=not selected or not report.trustworthy):
+        try:
+            context = prepare_email_input(selected)
+            plan = session.prepare(context.raw, context.reference, "natural", effective)
+            st.session_state["email_ai_input"] = context
+            st.session_state["email_ai_generation"] = st.session_state.get("email_ai_generation", 0) + 1
+            if plan.route == "local":
+                session.run(context.raw, context.reference, "natural", effective, None, confirmed=True)
+        except ValueError as error:
+            st.error(str(error))
+    if context:
+        render_preview(session, effective, context.raw, context.reference, "natural", repository.path, scope="email_ai", live_available=settings is not None)
+        def origin(candidate, index):
+            ordinal = sum(item.source_index == candidate.source_index for item in session.results[:index + 1])
+            return context.origin(candidate, ordinal)
+        render_results(session, repository, context.raw, context.reference, "natural", effective, scope="email_ai", origin_builder=origin)
+
+
+def _render_automation(repository, dependencies):
+    credentials = dependencies.credentials.get()
+    if credentials is None:
+        return
+    account = account_key(credentials.address)
+    cache = dependencies.cache
+    info = cache.info(account)
+    with st.expander("自动检查邮箱", expanded=False):
+        st.write(f"状态：{'已启用' if info['enabled'] else '已暂停'} · {info['status']}")
+        if info["next_due"]:
+            st.caption("下次到期（北京）：" + format_deadline(datetime.fromisoformat(info["next_due"])))
+        interval = st.selectbox("检查频率", (24, 48), index=0 if info["interval_hours"] == 24 else 1, format_func=lambda hours: "每天一次" if hours == 24 else "每两天一次", key="email_interval")
+        st.caption("仅 INBOX：首次最近 7 天最多 30 封，此后按 UID 每次最多 30 封。后台本地分类，不上传 AI、不自动写任务。为重启后显示看板，邮件正文与游标用当前 Windows 账户加密缓存，最多 200 封 / 30 天。")
+        st.caption("Windows 每小时检查是否到期，到期才读取；关闭网页仍可运行，关机、休眠或未登录时不能检查，重新登录后下一次检查补一次。授权失效会暂停。")
+        if st.button("开启自动检查 / 保存频率", key="email_auto_enable"):
+            try:
+                WindowsMailSchedule(task_path=repository.path).enable()
+                cache.configure(account, enabled=True, interval_hours=interval)
+            except RuntimeError as error:
+                st.error(str(error))
+            else:
+                st.success("自动检查已启用。无需保持网页开启，可点「同步邮件」立即更新一次。")
+        if st.button("暂停自动检查", key="email_auto_disable"):
+            cache.configure(account, enabled=False, interval_hours=interval)
+            try:
+                WindowsMailSchedule(task_path=repository.path).disable()
+            except RuntimeError:
+                st.info("本地到期门槛已关闭，任务即使被 Windows 唤起也不会读取邮箱。")
+            st.success("已暂停，缓存和任务保留。")
 
 
 def _render_rules() -> None:
@@ -723,4 +811,4 @@ def _render_rules() -> None:
         st.write("- **写库前必经确认**：不确认就不会写入；写入走与编程网格完全相同的去重与历史路径。")
         st.write("- **不删除**：邮件里没出现的本地任务不会被删除、取消或标记完成。")
         st.write("- **失败可重试**：解析失败的邮件会记录 UID 并保留，下次同步自动重试。")
-        st.write("- **凭据只在内存**：授权码默认不落盘，退出即失效；本页也不会把它写进日志。")
+        st.write("- **凭据由系统保护**：授权码只保存在 Windows 凭据管理器，不写入日志、配置或数据库；可随时忘记邮箱。")

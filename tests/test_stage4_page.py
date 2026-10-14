@@ -33,8 +33,8 @@ def parse(app, raw="《虚构课程》第三次作业延期至下周三晚20:00�
     app.radio(key="page").set_value("Deadline 智能解析").run()
     app.text_area(key="parse_raw").set_value(raw).run()
     app.button(key="parse_scan").click().run()
-    app.checkbox(key="parse_confirm").check().run()
-    app.button(key="parse_run").click().run()
+    if app.session_state["parse_session"].results is None:
+        app.button(key="parse_run").click().run()
     assert not app.exception
     return f"candidate_{app.session_state['parse_generation']}_0_import"
 
@@ -123,7 +123,6 @@ def test_parsed_extension_updates_only_after_target_and_final_confirmation(setup
     assert app.button(key="parse_save").disabled
     assert repo.get_task(original.id).due_at == old_due
     app.selectbox(key=key + "_action").set_value("更新已有任务").run()
-    app.checkbox(key="parse_save_confirm").check().run()
     assert not app.button(key="parse_save").disabled
     app.button(key="parse_save").click().run()
     assert not app.exception
@@ -135,19 +134,15 @@ def test_parsed_extension_updates_only_after_target_and_final_confirmation(setup
     assert len(history["notice_hash"]) == 64
 
 
-def test_changing_decision_or_target_revision_revokes_save_confirmation(setup):
+def test_target_revision_change_on_save_requires_review_again(setup):
     app, repo = setup
     task = repo.add_task("虚构课程第三次作业", "虚构课程")
     key = parse(app)
     app.selectbox(key=key + "_action").set_value("更新已有任务").run()
-    app.checkbox(key="parse_save_confirm").check().run()
-    app.selectbox(key=key + "_action").set_value("关联重复通知，保留原任务").run()
-    assert not app.checkbox(key="parse_save_confirm").value
-    app.checkbox(key="parse_save_confirm").check().run()
     repo.set_completed(task.id, task.revision, True, confirmed=True)
-    app.run()
-    assert not app.checkbox(key="parse_save_confirm").value
-    assert app.button(key="parse_save").disabled
+    app.button(key="parse_save").click().run()
+    assert any("上次展示后已改变" in item.value for item in app.error)
+    assert repo.get_task(task.id).due_at is None
 
 
 def test_clearing_known_due_needs_explicit_choice(setup):
@@ -158,7 +153,6 @@ def test_clearing_known_due_needs_explicit_choice(setup):
     assert app.button(key="parse_save").disabled
     assert repo.get_task(original.id).due_at is not None
     app.checkbox(key=key + "_clear_due").check().run()
-    app.checkbox(key="parse_save_confirm").check().run()
     app.button(key="parse_save").click().run()
     assert not app.exception
     assert repo.get_task(original.id).due_at is None

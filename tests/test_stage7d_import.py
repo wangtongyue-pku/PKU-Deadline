@@ -111,18 +111,18 @@ def test_title_names_the_kind_only_when_one_message_has_several_dates():
 
 
 def test_a_new_deadline_becomes_one_new_proposal(repo):
-    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日前提交申请材料。"))))
+    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日20:00前提交申请材料。"))))
     assert kinds(plan) == {NEW}
     proposal = plan.proposals[0]
     assert proposal.record.source == EMAIL_SOURCE
-    assert proposal.record.deadline == datetime(2026, 12, 10, 0, 0, tzinfo=BEIJING)
+    assert proposal.record.deadline == datetime(2026, 12, 10, 20, 0, tzinfo=BEIJING)
     assert proposal.record.course == "教务处"
     assert plan.importable_count == 1
 
 
 def test_one_message_with_two_deadlines_separates_event_from_deadline(repo):
     plan = plan_for(repo, mailbox(
-        (1, raw("讲座通知", "报名截止2026年11月13日15:00，讲座将于2026年11月20日举行。")),
+        (1, raw("讲座通知", "报名截止2026年11月13日15:00，讲座将于2026年11月20日14:00举行。")),
     ))
     # One importable deadline; the event time is shown, never auto-imported.
     assert kinds(plan) == {NEW}
@@ -133,7 +133,7 @@ def test_one_message_with_two_deadlines_separates_event_from_deadline(repo):
 
 def test_two_importable_dates_in_one_message_get_distinguishable_titles(repo):
     plan = plan_for(repo, mailbox(
-        (1, raw("综合通知", "报名截止2026年11月13日15:00，作业提交截止2026年11月20日。")),
+        (1, raw("综合通知", "报名截止2026年11月13日15:00，作业提交截止2026年11月20日20:00。")),
     ))
     assert len(plan.proposals) == 2
     titles = sorted(item.record.task_title for item in plan.proposals)
@@ -141,7 +141,7 @@ def test_two_importable_dates_in_one_message_get_distinguishable_titles(repo):
 
 
 def test_activity_time_alone_never_creates_a_task(repo):
-    plan = plan_for(repo, mailbox((1, raw("讲座", "讲座将于2026年11月20日举行。"))))
+    plan = plan_for(repo, mailbox((1, raw("讲座", "讲座将于2026年11月20日14:00举行。"))))
     assert plan.proposals == ()
     assert len(plan.event_only) == 1
     assert plan.importable_count == 0
@@ -174,7 +174,7 @@ def test_truncated_body_is_skipped_and_never_imported(repo):
     # A single truncated message does not stop the rest of the batch.
     mixed = plan_for(repo, mailbox(
         (1, truncated_raw("长通知", "截止2026年12月1日。" + "正文内容" * 6000)),
-        (2, raw("作业", "作业提交截止2026-12-05。")),
+        (2, raw("作业", "作业提交截止2026-12-05 20:00。")),
     ))
     assert len(mixed.skipped) == 1
     assert len(mixed.proposals) == 1
@@ -192,23 +192,23 @@ def test_plain_information_mail_produces_no_proposal(repo):
 def test_re_syncing_the_same_message_is_unchanged_not_duplicated(repo):
     """Identity is the message id, so re-reading the same mail links, not duplicates."""
     same = "<fictional-same@pku.edu.cn>"
-    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。", message_id=same))))
+    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。", message_id=same))))
     decisions = default_decisions(first)
     created = apply_email_plan(repo, first, decisions, confirmed=True)
     assert len(created) == 1
     assert created[0].source == EMAIL_SOURCE
 
-    second_plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。", message_id=same))))
+    second_plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。", message_id=same))))
     assert kinds(second_plan) == {UNCHANGED}
     assert len(repo.list_tasks()) == 1
 
 
 def test_changed_deadline_offers_an_update_without_preselecting_it(repo):
     same = "<fictional-changed@pku.edu.cn>"
-    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。", message_id=same))))
+    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。", message_id=same))))
     apply_email_plan(repo, first, default_decisions(first), confirmed=True)
 
-    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05。", message_id=same))))
+    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05 20:00。", message_id=same))))
     assert kinds(later) == {DEADLINE_CHANGED}
     decision = default_decisions(later)[0]
     assert decision.action == "skip"  # never auto-applied
@@ -217,10 +217,10 @@ def test_changed_deadline_offers_an_update_without_preselecting_it(repo):
 
 
 def test_a_different_message_with_the_same_title_is_a_review_item_not_a_merge(repo):
-    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     apply_email_plan(repo, first, default_decisions(first), confirmed=True)
 
-    second = plan_for(repo, mailbox((2, raw("作业", "作业提交截止2026-12-01。"))))
+    second = plan_for(repo, mailbox((2, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     assert kinds(second) == {POSSIBLE_DUPLICATE}
     # A possible duplicate is offered as its own task, never merged by title.
     assert default_decisions(second)[0].action == "new"
@@ -251,14 +251,14 @@ def test_rejections_also_stop_the_plan(repo):
 
 
 def test_apply_refuses_without_confirmation_and_writes_nothing(repo):
-    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     with pytest.raises(ValueError):
         apply_email_plan(repo, plan, default_decisions(plan))
     assert repo.list_tasks() == []
 
 
 def test_apply_with_all_skipped_writes_nothing(repo):
-    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     decisions = tuple(ImportDecision("skip", reason="本轮不导入") for _ in plan.proposals)
     assert apply_email_plan(repo, plan, decisions, confirmed=True) == []
     assert repo.list_tasks() == []
@@ -267,22 +267,22 @@ def test_apply_with_all_skipped_writes_nothing(repo):
 def test_update_requires_a_reason(repo):
     """An update must never be applied without the reason the page promises to collect."""
     same = "<fictional-reason@pku.edu.cn>"
-    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。", message_id=same))))
+    first = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。", message_id=same))))
     apply_email_plan(repo, first, default_decisions(first), confirmed=True)
     task = repo.list_tasks()[0]
 
-    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05。", message_id=same))))
+    later = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-05 20:00。", message_id=same))))
     assert kinds(later) == {DEADLINE_CHANGED}
     decisions = (ImportDecision("update", target_id=task.id,
                                 expected_revision=task.revision, reason="  "),)
     with pytest.raises(ValueError):
         apply_email_plan(repo, later, decisions, confirmed=True)
-    assert repo.get_task(task.id).due_at == datetime(2026, 12, 1, 0, 0, tzinfo=BEIJING)
+    assert repo.get_task(task.id).due_at == datetime(2026, 12, 1, 20, 0, tzinfo=BEIJING)
 
 
 def test_a_failed_sync_never_deletes_existing_tasks(repo):
     """Requirement: 禁止同步失败时删除现有任务."""
-    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     apply_email_plan(repo, plan, default_decisions(plan), confirmed=True)
     existing = repo.list_tasks()
     assert len(existing) == 1
@@ -295,7 +295,7 @@ def test_a_failed_sync_never_deletes_existing_tasks(repo):
 
 
 def test_import_writes_the_email_source_and_a_hashed_identity(repo):
-    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日前提交申请材料。"))))
+    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日20:00前提交申请材料。"))))
     created = apply_email_plan(repo, plan, default_decisions(plan), confirmed=True)
     stored = created[0]
     assert stored.source == EMAIL_SOURCE
@@ -314,14 +314,14 @@ def test_import_writes_the_email_source_and_a_hashed_identity(repo):
 def test_imported_task_type_follows_the_deadline_kind(repo):
     plan = plan_for(repo, mailbox(
         (1, raw("活动报名", "报名截止2026年11月13日15:00。")),
-        (2, raw("作业", "作业提交截止2026-12-01。")),
+        (2, raw("作业", "作业提交截止2026-12-01 20:00。")),
     ))
     created = apply_email_plan(repo, plan, default_decisions(plan), confirmed=True)
     assert {task.task_type for task in created} == {"活动报名", "作业"}
 
 
 def test_migration_version_is_not_changed_by_import(repo):
-    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01。"))))
+    plan = plan_for(repo, mailbox((1, raw("作业", "作业提交截止2026-12-01 20:00。"))))
     apply_email_plan(repo, plan, default_decisions(plan), confirmed=True)
     import sqlite3
 
@@ -331,7 +331,7 @@ def test_migration_version_is_not_changed_by_import(repo):
 
 def test_describe_mentions_every_group_it_hides_nothing_in(repo):
     plan = plan_for(repo, mailbox(
-        (1, raw("综合通知", "报名截止2026年11月13日15:00，讲座将于2026年11月20日举行。")),
+        (1, raw("综合通知", "报名截止2026年11月13日15:00，讲座将于2026年11月20日14:00举行。")),
         (2, raw("截止通知", "作业提交截止，具体日期待定。")),
         (3, truncated_raw("长通知", "截止2026年12月1日。" + "正文内容" * 6000)),
     ))
@@ -342,7 +342,7 @@ def test_describe_mentions_every_group_it_hides_nothing_in(repo):
 
 
 def test_analysis_context_is_available_for_each_proposal(repo):
-    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日前提交申请材料。"))))
+    plan = plan_for(repo, mailbox((1, raw("奖学金申请", "请于2026年12月10日20:00前提交申请材料。"))))
     context = plan.context_for(plan.proposals[0].source_key)
     assert context is not None
     assert context.category in {"活动报名", "学校通知"}

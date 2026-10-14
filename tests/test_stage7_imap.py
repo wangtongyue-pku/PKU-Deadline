@@ -616,7 +616,9 @@ def test_windows_credential_store_stays_locked_without_confirmation():
         WindowsCredentialStore()
     with pytest.raises(PermissionError):
         WindowsCredentialStore(user_confirmed_persistence=False)
-    # Even a constructed one refuses to operate until the feature is actually built.
-    store = WindowsCredentialStore(user_confirmed_persistence=True)
-    with pytest.raises(NotImplementedError):
-        store.save(CREDENTIALS)
+    # Persistence is now implemented; inject an offline backend to avoid ever
+    # reading or modifying the user's real Windows credentials.
+    class Backend:
+        def get_password(self, *args): return None
+    store = WindowsCredentialStore(user_confirmed_persistence=True, backend=Backend())
+    assert store.get() is None

@@ -30,7 +30,7 @@ class DemoDeadline:
     """One date a demo message states, as an offset from the demo's reference day."""
 
     days_from_now: int
-    hour: int = 0
+    hour: int = 20
     minute: int = 0
 
 

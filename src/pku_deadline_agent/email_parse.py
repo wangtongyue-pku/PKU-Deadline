@@ -35,7 +35,7 @@ from pku_deadline_agent.email_models import (
     TASK_DEADLINE,
     UNCLEAR_TIME,
 )
-from pku_deadline_agent.time_utils import normalize_datetime
+from pku_deadline_agent.time_utils import BEIJING, normalize_datetime
 
 # --------------------------------------------------------------------- bounds
 
@@ -396,11 +396,16 @@ def extract_email_deadlines(record: RawEmailRecord) -> tuple[EmailDeadline, ...]
                 due = datetime(
                     int(year), int(groups["m"]), int(groups["d"]),
                     int(groups.get("h") or 0), int(groups.get("mi") or 0),
-                    tzinfo=record.sent_at.tzinfo if record.sent_at else None,
+                    tzinfo=BEIJING,
                 )
             except ValueError:
                 continue  # impossible date (2月30日) — data, not an error
             due = normalize_datetime(due)
+            # Calendar date is not evidence of midnight. Keep the expression
+            # for the in-page AI/manual review, never fabricate 00:00.
+            missing_clock = groups.get("h") is None
+            if missing_clock:
+                due = None
 
             kind = _kind_for_clauses(clauses, match.start(), match.end())
             if kind is None:
@@ -417,6 +422,6 @@ def extract_email_deadlines(record: RawEmailRecord) -> tuple[EmailDeadline, ...]
                 due_at=due,
                 raw_text=raw_text,
                 source_snippet=snippet_source,
-                needs_confirmation=(kind == UNCLEAR_TIME),
+                needs_confirmation=(kind == UNCLEAR_TIME or missing_clock),
             ))
     return tuple(found)

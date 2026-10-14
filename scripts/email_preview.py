@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pku_deadline_agent.database import TaskRepository  # noqa: E402
 from pku_deadline_agent.email_page import render_email_page  # noqa: E402
+from pku_deadline_agent.email_demo import demo_mailbox
+from pku_deadline_agent.email_page import DEMO_FACTORY_KEY
 
 DEMO_DATABASE = Path(__file__).resolve().parents[1] / ".local-tmp" / "email-preview.sqlite3"
 
@@ -27,4 +29,5 @@ st.caption("这是用于本地检查的独立实例：数据库是虚构的，�
 
 repository = TaskRepository(DEMO_DATABASE)
 repository.initialize()
+st.session_state[DEMO_FACTORY_KEY] = demo_mailbox
 render_email_page(repository)

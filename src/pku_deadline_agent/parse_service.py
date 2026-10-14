@@ -136,7 +136,7 @@ class ParseSession:
         self.results = tuple(sorted((*current.local_tasks, *tasks), key=lambda task: task.source_index))
         return self.results
 
-    def save(self, repository, raw, published_at, mode, settings, selected: tuple[ExtractedTask, ...], *, confirmed: bool, decisions=None):
+    def save(self, repository, raw, published_at, mode, settings, selected: tuple[ExtractedTask, ...], *, confirmed: bool, decisions=None, origins=None):
         if not confirmed:
             raise ValueError("请先审核最终任务并确认保存。")
         if self.observe(raw, published_at, mode, settings) or self.results is None or self.saved:
@@ -151,7 +151,8 @@ class ParseSession:
             if scan_privacy(json.dumps(item.to_dict(), ensure_ascii=False)).findings:
                 raise ValueError("最终任务含疑似个人信息或认证内容，请修改后保存。")
         sources = {notice.source_index: notice for notice in self.plan.batch.notices}
-        origins = tuple(origin_for_notice(sources[item.source_index]) for item in selected)
+        if origins is None:
+            origins = tuple(origin_for_notice(sources[item.source_index]) for item in selected)
         if decisions is None:
             decisions = tuple(ImportDecision("new") for item in selected)
         tasks = repository.apply_reviewed_tasks(selected, decisions, origins, confirmed=True)

@@ -11,7 +11,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pku_deadline_agent.database import TaskRepository
-from pku_deadline_agent.email_demo import DEMO_SUBJECTS
+from pku_deadline_agent.email_demo import DEMO_SUBJECTS, demo_mailbox
 from pku_deadline_agent.email_page import DEMO_FACTORY_KEY, MODE_DEMO, MODE_REAL
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
@@ -40,8 +40,7 @@ def open_page(repo, monkeypatch, *, factory=None, page=PAGE, seed=None):
     app.session_state["page"] = page
     # The demo branch reads its mailbox factory from session state, so the
     # substitution survives Streamlit's re-import of the page module.
-    if factory is not None:
-        app.session_state[DEMO_FACTORY_KEY] = factory
+    app.session_state[DEMO_FACTORY_KEY] = factory or demo_mailbox
     for key, value in (seed or {}).items():
         app.session_state[key] = value
     return app.run()
@@ -117,8 +116,11 @@ def test_page_opens_with_demo_mode_and_connection_controls(repo, monkeypatch):
 
 
 def test_real_mode_asks_for_credentials_without_echoing_them(repo, monkeypatch):
+    from pku_deadline_agent.email_credentials import SessionCredentialStore
+    from pku_deadline_agent.email_page import EmailPageDependencies
+    from pku_deadline_agent.email_sync import MailboxStateStore
+    monkeypatch.setattr("pku_deadline_agent.email_page.build_dependencies", lambda mode: EmailPageDependencies(MODE_REAL, demo_mailbox, SessionCredentialStore(), MailboxStateStore(), "fictional"))
     app = open_page(repo, monkeypatch)
-    app.radio(key="email_mode").set_value(MODE_REAL).run()
     assert not app.exception, app.exception
     labels = [item.label for item in app.text_input]
     assert any("授权码" in label for label in labels)
@@ -131,8 +133,11 @@ def test_sync_without_credentials_stops_before_connecting(repo, monkeypatch):
     def refuse():
         raise AssertionError("在没有凭据时不应尝试连接")
 
+    from pku_deadline_agent.email_credentials import SessionCredentialStore
+    from pku_deadline_agent.email_page import EmailPageDependencies
+    from pku_deadline_agent.email_sync import MailboxStateStore
+    monkeypatch.setattr("pku_deadline_agent.email_page.build_dependencies", lambda mode: EmailPageDependencies(MODE_REAL, refuse, SessionCredentialStore(), MailboxStateStore(), "fictional"))
     app = open_page(repo, monkeypatch, factory=refuse)
-    app.radio(key="email_mode").set_value(MODE_REAL).run()
     app = _click(app, "email_sync")
     app = settle(app)
     assert not app.exception, app.exception
@@ -172,7 +177,7 @@ def test_disconnect_clears_credentials_and_preview(repo, monkeypatch):
     app = settle(app)
     assert metrics(app)["上次同步"] == "尚未同步"
     assert metrics(app)["本次邮件数"] == "—"
-    assert any("已断开" in item.value for item in app.info)
+    assert any("已暂停" in item.value for item in app.info)
     assert not any(SUBJECTS["homework"] in title for title in expander_titles(app))
 
 
@@ -253,12 +258,10 @@ def confirm_key(app):
     return keys[0]
 
 
-def test_import_requires_the_confirmation_checkbox(repo, monkeypatch):
+def test_import_requires_one_explicit_save_click(repo, monkeypatch):
     app = sync_and_open(repo, monkeypatch)
     buttons = import_buttons(app)
     assert len(buttons) == 1
-    assert buttons[0].disabled is True
-    app = _check(app, confirm_key(app))
     assert import_buttons(app)[0].disabled is False
     # Still nothing written until the button is actually pressed.
     assert repo.list_tasks() == []
@@ -266,7 +269,6 @@ def test_import_requires_the_confirmation_checkbox(repo, monkeypatch):
 
 def test_import_writes_confirmed_tasks_with_the_email_source(repo, monkeypatch):
     app = sync_and_open(repo, monkeypatch)
-    app = _check(app, confirm_key(app))
     app = _click(app, "email_apply_1")
     assert not app.exception, app.exception
     tasks = repo.list_tasks()
@@ -281,7 +283,6 @@ def test_import_writes_confirmed_tasks_with_the_email_source(repo, monkeypatch):
 
 def test_activity_time_is_shown_but_never_imported(repo, monkeypatch):
     app = sync_and_open(repo, monkeypatch)
-    app = _check(app, confirm_key(app))
     app = _click(app, "email_apply_1")
     tasks = repo.list_tasks()
     assert not any("讲座" in task.title and "举办" in task.title for task in tasks)
@@ -300,7 +301,6 @@ def test_undated_time_is_listed_for_manual_entry(repo, monkeypatch):
 
 def test_second_sync_of_the_same_inbox_changes_nothing(repo, monkeypatch):
     app = sync_and_open(repo, monkeypatch)
-    app = _check(app, confirm_key(app))
     app = _click(app, "email_apply_1")
     first = repo.list_tasks()
 
@@ -361,23 +361,29 @@ def test_feedback_refuses_a_no_op_correction(repo, monkeypatch):
 
 def test_ai_section_prepares_a_minimal_payload_only_after_confirmation(repo, monkeypatch):
     app = sync_and_open(repo, monkeypatch)
+    assert not any(item.key == "email_ai_prepare" for item in app.button)
+    app.toggle(key="email_use_ai").set_value(True).run()
     prepare = [item for item in app.button if item.key == "email_ai_prepare"]
     assert prepare and prepare[0].disabled is True
-    app = _check(app, "email_ai_confirm")
+    choices = app.multiselect(key="email_ai_selection").options
+    app.multiselect(key="email_ai_selection").set_value([choices[0]]).run()
     prepare = [item for item in app.button if item.key == "email_ai_prepare"]
     assert prepare[0].disabled is False
     # The page states the guarantee it enforces: bodies and attachments never leave.
     combined = "\n".join(item.value for item in app.caption)
-    assert "正文与附件不在其中" in combined
+    assert "不上传附件或邮件头" in combined
 
 
 def test_ai_section_never_sends_anything(repo, monkeypatch):
-    """The gate prepares a payload; dispatch stays in the parse page."""
+    """Preparing is local; no request until the separate preview approval click."""
     app = sync_and_open(repo, monkeypatch)
-    app = _check(app, "email_ai_confirm")
+    app.toggle(key="email_use_ai").set_value(True).run()
+    choices = app.multiselect(key="email_ai_selection").options
+    app.multiselect(key="email_ai_selection").set_value([choices[0]]).run()
     app = _click(app, "email_ai_prepare")
     assert not app.exception, app.exception
-    assert any("只准备载荷、不发送" in item.value for item in app.caption)
+    assert not app.session_state["email_ai_session"].mock.requests
+    assert repo.list_tasks() == []
 
 
 # ------------------------------------------------------------------ boundaries
@@ -390,12 +396,10 @@ def test_page_never_writes_tasks_without_a_confirmed_import(repo, monkeypatch):
     assert repo.list_tasks() == []
 
 
-def test_demo_mode_is_the_default_so_no_account_is_needed(repo, monkeypatch):
+def test_no_demo_real_switch_is_offered(repo, monkeypatch):
     app = open_page(repo, monkeypatch)
-    assert app.radio(key="email_mode").value == MODE_DEMO
+    assert not any(item.key == "email_mode" for item in app.radio)
     assert not any(item.type == "password" for item in app.text_input)
-    combined = "\n".join(item.value for item in app.info)
-    assert "不会访问任何网络或真实邮箱" in combined
 
 
 def test_demo_inbox_parses_cleanly_and_states_distinct_dates():

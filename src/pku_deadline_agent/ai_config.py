@@ -88,6 +88,9 @@ def load_settings(provider: str, *, live: bool = False, model: str | None = None
     if not live:
         # Simulated mode must not read real API configuration, even if configured.
         return AISettings(provider, model or next(iter(models)))
+    if os.environ.get("PKU_REAL_API_ENABLED") != "1":
+        # Disabled real mode must not even query the user's credential vault.
+        raise ValueError("真实调用尚未启用；请先明确授权并设置 PKU_REAL_API_ENABLED=1。")
     prefix = "PKU_DEEPSEEK" if provider == "DeepSeek" else "PKU_MIMO"
     selected = model or os.environ.get(prefix + "_MODEL", next(iter(models)))
     defaults = models.get(selected, ("", ""))

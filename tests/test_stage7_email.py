@@ -211,14 +211,15 @@ def test_registration_deadline_is_distinct_from_event_time():
     assert REGISTRATION_DEADLINE in kinds and EVENT_TIME in kinds
     by_kind = {d.kind: d.due_at for d in deadlines}
     assert by_kind[REGISTRATION_DEADLINE] == datetime(2026, 11, 13, 15, 0, tzinfo=BEIJING)
-    assert by_kind[EVENT_TIME] == datetime(2026, 11, 20, 0, 0, tzinfo=BEIJING)
+    assert by_kind[EVENT_TIME] is None
+    assert next(d for d in deadlines if d.kind == EVENT_TIME).needs_confirmation
 
 
 def test_task_deadline_and_slash_dates():
     raw = make_email(subject="作业", body="作业提交截止2026-12-01。")
     record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
     deadlines = analyze_email(record).deadlines
-    assert any(d.kind == HOMEWORK_DEADLINE and d.due_at == datetime(2026, 12, 1, 0, 0, tzinfo=BEIJING)
+    assert any(d.kind == HOMEWORK_DEADLINE and d.due_at is None and d.needs_confirmation
                for d in deadlines)
 
 
@@ -227,7 +228,7 @@ def test_material_submission_deadline_is_distinct():
     record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
     deadlines = analyze_email(record).deadlines
     assert any(d.kind == MATERIAL_SUBMISSION_DEADLINE
-               and d.due_at == datetime(2026, 12, 10, 0, 0, tzinfo=BEIJING)
+               and d.due_at is None and d.needs_confirmation
                for d in deadlines)
 
 
@@ -244,7 +245,7 @@ def test_plain_mentioned_dates_do_not_become_deadlines():
 
 
 def test_date_without_year_defaults_to_the_message_year():
-    raw = make_email(subject="活动", body="活动时间11月20日举行。",
+    raw = make_email(subject="活动", body="活动时间11月20日15:00举行。",
                      date=datetime(2026, 11, 1, 10, 0, tzinfo=BEIJING))
     record, _ = parse_raw_email(raw, uid=1, folder=DEFAULT_FOLDER, uidvalidity=1)
     deadlines = analyze_email(record).deadlines

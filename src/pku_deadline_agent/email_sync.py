@@ -120,7 +120,8 @@ class EmailSyncService:
 
     def sync(self, folder: str = DEFAULT_FOLDER, *, retry_failed: bool = True,
              window_hours: float | None = None,
-             max_messages: int | None = None) -> EmailSyncReport:
+             max_messages: int | None = None,
+             max_total_messages: int | None = None) -> EmailSyncReport:
         """One pass. Failed-parse messages from earlier passes are retried first
         (recorded, never silently skipped), then the normal incremental run.
 
@@ -133,13 +134,18 @@ class EmailSyncService:
         """
         if window_hours is not None:
             return self._run_bounded(folder, window_hours, max_messages)
+        if max_total_messages is not None and (type(max_total_messages) is not int or not 1 <= max_total_messages <= DEFAULT_FETCH_LIMIT):
+            raise ValueError("单次读取总量必须为 1–50 封。")
         state = self._state.get(folder)
         if state is None:
-            report = self._run_initial(folder)
+            report = self._run_initial(folder, limit=max_total_messages)
         else:
-            report = self._run_incremental(folder, state)
-        if retry_failed and state is not None and state.failed_uids:
-            report = self._retry(folder, report, state.failed_uids)
+            report = self._run_incremental(folder, state, total_limit=max_total_messages)
+        current_state = self._state.get(folder)
+        if retry_failed and state is not None and state.failed_uids and current_state is not None and current_state.uidvalidity == state.uidvalidity:
+            remaining = None if max_total_messages is None else max(0, max_total_messages - len(report.analyses) - len(report.rejections))
+            if remaining is None or remaining > 0:
+                report = self._retry(folder, report, state.failed_uids, limit=remaining)
         return report
 
     def reset_state(self, folder: str = DEFAULT_FOLDER) -> None:
@@ -182,21 +188,21 @@ class EmailSyncService:
                             window_hours=window_hours, keep_state=True,
                             excluded_older_count=excluded)
 
-    def _run_initial(self, folder: str) -> EmailSyncReport:
+    def _run_initial(self, folder: str, *, limit=None) -> EmailSyncReport:
         since = beijing_now() - timedelta(days=self._initial_days)
         adapter = self._adapter_factory()
         try:
             result = adapter.fetch_since(
-                folder, 0, limit=min(self._initial_max, self._batch_limit), since_date=since
+                folder, 0, limit=min(self._initial_max, self._batch_limit, limit or self._batch_limit), since_date=since
             )
         finally:
             adapter.close()
         return self._finish(folder, result, mode="initial")
 
-    def _run_incremental(self, folder: str, state: MailboxState) -> EmailSyncReport:
+    def _run_incremental(self, folder: str, state: MailboxState, *, total_limit=None) -> EmailSyncReport:
         adapter = self._adapter_factory()
         try:
-            result = adapter.fetch_since(folder, state.highest_uid, limit=self._batch_limit)
+            result = adapter.fetch_since(folder, state.highest_uid, limit=min(self._batch_limit, total_limit or self._batch_limit))
         finally:
             adapter.close()
 
@@ -204,7 +210,11 @@ class EmailSyncService:
             # Server renumbered the mailbox. Treat as fresh: warn loudly, reset,
             # and re-run with the initial constraints so scope stays bounded.
             self._state.reset(folder)
-            report = self._run_initial(folder)
+            remaining = None if total_limit is None else max(0, total_limit - len(result.records) - len(result.rejected_uids))
+            if remaining == 0:
+                return EmailSyncReport(folder, "initial", result.uidvalidity, 0, (), True,
+                                       warnings=("UIDVALIDITY 已变化，本次读取额度已用完；保留原看板，下次按初始范围重新读取。",))
+            report = self._run_initial(folder, limit=remaining)
             report = EmailSyncReport(
                 folder=report.folder,
                 mode=report.mode,
@@ -267,17 +277,20 @@ class EmailSyncService:
             still_failed_uids=merged_failed,
         )
 
-    def _retry(self, folder: str, report: EmailSyncReport, failed_uids) -> EmailSyncReport:
+    def _retry(self, folder: str, report: EmailSyncReport, failed_uids, *, limit=None) -> EmailSyncReport:
         """Re-read the recorded failures; successes leave the retry list."""
         adapter = self._adapter_factory()
         try:
-            result = adapter.fetch_uids(folder, failed_uids)
+            result = adapter.fetch_uids(folder, failed_uids if limit is None else failed_uids[:limit])
         finally:
             adapter.close()
 
+        if result.uidvalidity != report.uidvalidity:
+            raise EmailAdapterError("重试期间 UIDVALIDITY 已变化，保留原看板，请重新同步。")
         retried = [record.uid for record in result.records]
-        still = [uid for uid in failed_uids if uid not in retried]
         state = self._state.get(folder)
+        pending = tuple(dict.fromkeys((*failed_uids, *(state.failed_uids if state else ()))))
+        still = [uid for uid in pending if uid not in retried]
         if state is not None:
             self._state.set(folder, MailboxState(
                 state.uidvalidity, state.highest_uid, failed_uids=tuple(still)

@@ -1,15 +1,7 @@
-"""Stage 7B credential handling for the read-only mailbox connection.
+"""Mailbox credentials: current-user Windows vault, no plaintext fallback.
 
-Rules set by the user:
-
-- Credentials are entered by the user (a page control arrives in 7D; a terminal
-  helper is provided here for manual use). They never appear in the agent dialog,
-  logs, or source.
-- **Default: current session only.** :class:`SessionCredentialStore` keeps the
-  authorization code in process memory and forgets it on exit.
-- Persisting into the Windows Credential Manager is possible but **disabled
-  until the user explicitly confirms it** — :class:`WindowsCredentialStore`
-  refuses to run until that decision is made, and says so.
+Persistence and daily checks were explicitly requested on 2026-10-13. Session
+storage remains for injectable offline tests; production uses the Windows vault.
 """
 
 from __future__ import annotations
@@ -17,6 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from getpass import getpass
 from typing import Protocol
+import json
+import os
+import re
 
 
 @dataclass(frozen=True)
@@ -61,33 +56,72 @@ class SessionCredentialStore:
 
 
 class WindowsCredentialStore:
-    """Windows Credential Manager storage — **intentionally not active**.
+    """One replaceable mailbox, encrypted by the current Windows account.
 
-    Persisting the authorization code outside the process is a security decision
-    the user must make explicitly. Until they do, construction fails with the
-    exact question that needs answering, so this path cannot be drifted into by
-    accident.
+    No plaintext fallback. The user has authorized persistence in the product;
+    callers still pass the explicit gate. Tests inject an in-memory backend.
     """
+
+    SERVICE = "PKU Deadline Agent Mail"
+    ACCOUNT = "default-mailbox"
 
     _CONFIRMATION_MESSAGE = (
         "Windows 凭据管理器持久化尚未获得用户确认：授权码将以系统级加密形式保存在本机，"
         "任何能以当前 Windows 账户运行的程序都可以读取它。确认接受此权衡后才会启用。"
     )
 
-    def __init__(self, *, user_confirmed_persistence: bool = False) -> None:
+    def __init__(self, *, user_confirmed_persistence: bool = False, backend=None) -> None:
         if not user_confirmed_persistence:
             raise PermissionError(self._CONFIRMATION_MESSAGE)
         self._user_confirmed = user_confirmed_persistence
-        self._fallback = SessionCredentialStore()  # replaced by wincred in the confirmed path
+        self._backend = backend
+
+    def _storage(self):
+        if self._backend is None:
+            if os.name != "nt":
+                raise RuntimeError("邮箱安全保存仅支持 Windows 凭据管理器。")
+            try:
+                from keyring.backends.Windows import WinVaultKeyring
+                self._backend = WinVaultKeyring()
+            except Exception:
+                raise RuntimeError('无法使用 Windows 凭据管理器；请确认已安装可选依赖 .[secrets]。') from None
+        return self._backend
 
     def save(self, credentials: MailCredentials) -> None:
-        raise NotImplementedError(self._CONFIRMATION_MESSAGE)
+        validate_credentials(credentials)
+        value = json.dumps({"address": credentials.address, "code": credentials.authorization_code})
+        try:
+            self._storage().set_password(self.SERVICE, self.ACCOUNT, value)
+        except Exception:
+            raise RuntimeError("邮箱凭据保存失败，请检查 Windows 凭据管理器；未写入明文文件。") from None
 
     def get(self) -> MailCredentials | None:
-        raise NotImplementedError(self._CONFIRMATION_MESSAGE)
+        try:
+            value = self._storage().get_password(self.SERVICE, self.ACCOUNT)
+            if value is None:
+                return None
+            data = json.loads(value)
+            credentials = MailCredentials(data["address"], data["code"])
+            validate_credentials(credentials)
+            return credentials
+        except Exception:
+            raise RuntimeError("无法读取已保存的邮箱凭据，请重新保存或检查 Windows 凭据管理器。") from None
 
     def clear(self) -> None:
-        raise NotImplementedError(self._CONFIRMATION_MESSAGE)
+        try:
+            backend = self._storage()
+            if backend.get_password(self.SERVICE, self.ACCOUNT) is not None:
+                backend.delete_password(self.SERVICE, self.ACCOUNT)
+        except Exception:
+            raise RuntimeError("无法移除已保存的邮箱凭据，请检查 Windows 凭据管理器。") from None
+
+
+def validate_credentials(credentials: MailCredentials) -> None:
+    if not isinstance(credentials.address, str) or not re.fullmatch(r"[A-Za-z0-9._+\-]{1,100}@(?:stu\.)?pku\.edu\.cn", credentials.address):
+        raise ValueError("请填写完整的北大邮箱地址。")
+    code = credentials.authorization_code
+    if not isinstance(code, str) or not 1 <= len(code) <= 512 or any(ord(c) < 33 or ord(c) > 126 for c in code):
+        raise ValueError("客户端授权码不能为空，且不能含空格、换行或非 ASCII 字符。")
 
 
 def read_credentials_interactively() -> MailCredentials:

@@ -30,16 +30,15 @@ def main() -> None:
         with st.expander("这个程序做什么", expanded=False):
             st.write(
                 "本地优先的 Deadline 助手。数据只存在这台电脑的 SQLite 里，"
-                "不联网、不调用 AI（除非你在「Deadline 智能解析」里显式开启真实模型）。"
+                "邮箱只读同步；AI 提取需查看脱敏预览后点击发送。"
             )
             st.write("**可用**：手动添加与编辑、完成状态、回收站、重复核对、截止变更历史、"
                      "独立本地提醒、微信通知导入、编程网格「一键同步」、"
                      "学校邮箱只读分类与 Deadline 导入。")
-            st.write("**不在范围内**：教学网与 pku3b。**尚未实现**：每日定时同步（6C-3）"
-                     "与邮箱后台自动同步。")
+            st.write("**不在范围内**：教学网与 pku3b。学校邮箱支持每天自动检查；编程网格定时同步尚未实现。")
         with st.expander("安全边界", expanded=False):
             st.write("程序不读取你的密码：编程网格的登录在它自己打开的浏览器窗口里由你完成。")
-            st.write("学校邮箱只**只读**读取 INBOX；授权码默认只存在于本次运行的内存中，退出即失效。")
+            st.write("学校邮箱只读读取 INBOX；授权码由 Windows 凭据管理器保存，可随时忘记。后台检查不上传 AI。")
             st.write("API Key 可在「AI 设置」页保存到 **Windows 凭据管理器**，"
                      "页面只显示是否已配置，不回显 Key。")
             st.write("不要把密码、Cookie、Token 或私人聊天原文填进任务里。")
@@ -52,6 +51,11 @@ def main() -> None:
         for key in ("grid_payload", "grid_plan", "grid_digest"):
             st.session_state.pop(key, None)
         st.session_state["grid_confirm"] = False
+    if page != "学校邮箱":
+        mail_parse = st.session_state.pop("email_ai_session", None)
+        if mail_parse is not None:
+            mail_parse.invalidate()
+        st.session_state.pop("email_ai_input", None)
     if page == "Deadline 智能解析":
         if "notice_review" in st.session_state:
             st.session_state["notice_review"].preview = None

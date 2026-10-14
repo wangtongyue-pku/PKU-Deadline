@@ -114,14 +114,14 @@ def test_advertisement_needs_both_the_wording_and_a_non_campus_sender():
 
 
 def test_importance_is_explainable_and_high_inside_the_window():
-    analysis = analyze(subject="作业", body="作业提交截止2026年11月3日。")
+    analysis = analyze(subject="作业", body="作业提交截止2026年11月3日20:00。")
     assert analysis.deadlines
     assert analysis.importance == IMPORTANCE_HIGH
     assert any("3 天窗口" in reason for reason in analysis.importance_reasons)
 
 
 def test_importance_medium_for_a_later_deadline():
-    analysis = analyze(subject="活动", body="活动时间2026年12月20日举行。")
+    analysis = analyze(subject="活动", body="活动时间2026年12月20日15:00举行。")
     assert analysis.importance == IMPORTANCE_MEDIUM
     assert any("12-20" in reason for reason in analysis.importance_reasons)
 
@@ -202,7 +202,7 @@ def test_digest_counts_today_older_and_undated_separately():
 
 def test_digest_separates_deadlines_from_events_and_marks_unconfirmed():
     analyses = [
-        analyze(subject="活动", uid=1, body="报名截止2026年11月10日，讲座将于2026年11月20日举行。"),
+        analyze(subject="活动", uid=1, body="报名截止2026年11月10日15:00，讲座将于2026年11月20日14:00举行。"),
     ]
     digest = build_daily_digest(analyses, day=date(2026, 11, 1), now=NOW)
     kinds = {item.kind for item in digest.deadlines}
@@ -322,7 +322,7 @@ def test_publication_date_is_not_promoted_to_a_deadline():
 
 
 def test_a_cue_from_another_sentence_is_not_borrowed():
-    analysis = analyze(subject="通知", body="本通知发布于2026年11月1日。报名截止11月30日。")
+    analysis = analyze(subject="通知", body="本通知发布于2026年11月1日。报名截止11月30日15:00。")
     kinds = {(d.kind, d.due_at.date()) for d in analysis.deadlines}
     assert kinds == {(REGISTRATION_DEADLINE, date(2026, 11, 30))}
 
@@ -333,7 +333,7 @@ def test_registration_cue_is_still_borrowed_from_the_adjacent_clause():
     found = {(d.kind, d.due_at) for d in analysis.deadlines}
     assert found == {
         (REGISTRATION_DEADLINE, datetime(2026, 11, 13, 15, 0, tzinfo=BEIJING)),
-        (EVENT_TIME, datetime(2026, 11, 20, 0, 0, tzinfo=BEIJING)),
+        (EVENT_TIME, None),
     }
 
 

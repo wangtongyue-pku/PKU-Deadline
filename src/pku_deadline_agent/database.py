@@ -11,7 +11,7 @@ from typing import Iterator
 
 from pku_deadline_agent.models import SOURCES, TASK_TYPES, Task
 from pku_deadline_agent.time_utils import beijing_now, normalize_datetime
-from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin, find_matches
+from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin, MatchSuggestion, find_matches
 
 SCHEMA_VERSION = 4
 
@@ -343,6 +343,15 @@ class TaskRepository:
 
     def _matches(self, connection, candidate, origin):
         tasks = [self._to_task(row) for row in connection.execute("SELECT * FROM tasks WHERE deleted_at IS NULL")]
+        if origin.source == "email" and origin.notice_hash:
+            linked = {row[0] for row in connection.execute("SELECT task_id FROM task_notices WHERE source='email' AND notice_hash=?", (origin.notice_hash,))}
+            if linked:
+                matches = []
+                for task in tasks:
+                    if task.id in linked:
+                        equal = (candidate.title, candidate.category, candidate.task_type, candidate.due_at) == (task.title, task.category, task.task_type, task.due_at)
+                        matches.append(MatchSuggestion(task, "duplicate" if equal else "deadline_change", "同一邮件任务来源；字段变化需核对，不能因模型改写名称再次新增"))
+                return tuple(matches)
         hashes = {}
         for row in connection.execute("SELECT task_id,notice_hash FROM task_notices"):
             hashes.setdefault(row[0], set()).add(row[1])
@@ -412,6 +421,8 @@ class TaskRepository:
                     continue
                 matches = self._matches(connection, item, origin)
                 if decision.action == "new":
+                    if origin.source == "email" and origin.notice_hash and connection.execute("SELECT 1 FROM task_notices WHERE source='email' AND notice_hash=?", (origin.notice_hash,)).fetchone():
+                        raise ValueError("该邮件任务来源已经关联本地任务（可能在回收站），请选择关联、更新或先恢复原任务；整批未保存。")
                     if matches and not decision.allow_distinct:
                         if any(match.task.id not in original_ids for match in matches):
                             raise ValueError("本批候选之间存在重复或疑似改期，请只选择一项保存或分批核对。")
