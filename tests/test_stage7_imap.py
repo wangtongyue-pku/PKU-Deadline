@@ -201,6 +201,56 @@ def store_with(server) -> SessionCredentialStore:
     return store
 
 
+def direct_adapter(server) -> RealImapAdapter:
+    """An adapter wired to the fake server, for checks that are not a sync."""
+    return RealImapAdapter(
+        CREDENTIALS, host="127.0.0.1", port=server.port, timeout=10,
+        connection_factory=plain_factory,
+    )
+
+
+# ------------------------------------------------- connection check (7E step 1)
+
+def test_connection_check_authenticates_without_reading_any_message(fake_server):
+    """The first real connection verifies login only; no message may be fetched.
+
+    This is the narrowest authorised step, so it is pinned on the wire: the
+    adapter logs in and lists folders, and nothing else reaches the server. If a
+    future refactor makes the check read mail, this test fails.
+    """
+    adapter = direct_adapter(fake_server)
+    try:
+        folders = adapter.list_folders()
+    finally:
+        adapter.close()
+
+    assert folders[0] == DEFAULT_FOLDER
+    assert adapter.operations == ["list_folders", "close"]
+    commands = fake_server.commands
+    assert any(" LOGIN " in line for line in commands)
+    assert any(" LIST" in line for line in commands)
+    assert fake_server.selected == []          # no mailbox was ever opened
+    for line in commands:
+        tokens = line.split()
+        command = tokens[1] if len(tokens) >= 2 else ""
+        assert command != "FETCH", line
+        # UID FETCH is the only body reader; it must not appear in any spelling.
+        assert "FETCH" not in line.upper(), line
+        assert command not in {"SELECT", "EXAMINE", "STORE", "EXPUNGE", "APPEND", "COPY"}, line
+
+
+def test_connection_check_reports_only_folder_names(fake_server):
+    """What the page can show after a check is folder names — no message content."""
+    adapter = direct_adapter(fake_server)
+    try:
+        folders = adapter.list_folders()
+    finally:
+        adapter.close()
+    assert folders == (DEFAULT_FOLDER,)
+    # Nothing from inside the mailbox is reachable through the check.
+    assert all("@" not in name for name in folders)
+
+
 # ------------------------------------------------------------------ happy path
 
 def test_initial_sync_over_the_wire_is_read_only(fake_server):
