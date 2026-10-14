@@ -16,6 +16,7 @@ from email.utils import format_datetime
 import pytest
 
 from pku_deadline_agent.email_adapter import DEFAULT_FOLDER
+from pku_deadline_agent.email_adapter import ALLOWED_OPERATIONS
 from pku_deadline_agent.email_adapter import EmailAdapterError
 from pku_deadline_agent.email_adapter import EmailAuthRequired
 from pku_deadline_agent.email_adapter import EmailNetworkError
@@ -340,6 +341,177 @@ def test_initial_sync_is_bounded_to_seven_days_and_thirty_messages(fake_server, 
     assert follow_up.mode == "incremental"
     assert [a.record.uid for a in follow_up.analyses] == [*range(31, 36), 99]
     assert not follow_up.has_more
+
+
+# ------------------------------------------------------ bounded (7E step 2) pass
+
+BODY_MARKER = "这段正文只应出现在内存里"
+
+
+def bounded_mailbox(now):
+    """Messages inside and outside a 48-hour window, plus more than the cap."""
+    def at(uid, hours_ago):
+        sent = now - timedelta(hours=hours_ago)
+        raw = build_raw(
+            subject=f"虚构受限通知 {uid}",
+            body=f"{BODY_MARKER}（UID {uid}）——作业提交截止2026年12月1日。",
+            message_id=f"<bounded-{uid}@pku.edu.cn>",
+            sent=sent,
+        )
+        return raw, sent
+
+    return {
+        1: at(1, 1), 2: at(2, 5), 3: at(3, 30),
+        4: at(4, 47), 5: at(5, 49), 6: at(6, 72), 7: at(7, 200),
+    }
+
+
+def test_bounded_pass_reads_only_the_stated_window_and_count(fake_server, monkeypatch):
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    report = service.sync(window_hours=48, max_messages=5)
+
+    assert report.mode == "bounded"
+    assert report.window_hours == 48
+    assert len(report.analyses) <= 5
+    # Nothing older than 48 hours may be parsed, even though the fake server's
+    # SINCE filter is day-granular and would hand some of it back.
+    for analysis in report.analyses:
+        assert analysis.record.sent_at >= fixed_now - timedelta(hours=48)
+    assert all(a.record.uid not in {5, 6, 7} for a in report.analyses)
+    assert "48 小时" in report.describe_scope
+
+
+def test_bounded_pass_asks_the_server_for_the_window_and_the_cap(fake_server, monkeypatch):
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    service.sync(window_hours=48, max_messages=5)
+
+    since_lines = [line for line in fake_server.commands if "SINCE" in line]
+    assert since_lines, "受限读取必须带 SINCE，服务器端先缩小范围"
+    expected_day = (fixed_now - timedelta(hours=48)).date()
+    for line in since_lines:
+        token = line.split('"')[1] if '"' in line else line.split()[-1]
+        assert datetime.strptime(token.split()[0], "%d-%b-%Y").date() == expected_day
+    # The cap reached the server, so it never has to send more than asked.
+    assert any("UID SEARCH SINCE" in line for line in fake_server.commands)
+
+
+def test_bounded_pass_is_read_only_on_the_wire(fake_server, monkeypatch):
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    service.sync(window_hours=48, max_messages=5)
+
+    commands = "\n".join(fake_server.commands)
+    assert " EXAMINE " in commands and " SELECT " not in commands
+    assert "BODY.PEEK[]" in commands
+    assert "BODY[]" not in commands.replace("BODY.PEEK[]", "")
+    for forbidden in FORBIDDEN_ON_WIRE:
+        for line in fake_server.commands:
+            tokens = line.split()
+            assert not (len(tokens) >= 2 and tokens[1] == forbidden), line
+
+
+def test_bounded_pass_does_not_touch_the_incremental_cursor(fake_server, monkeypatch):
+    """A scoped test must not change what a later normal sync reads."""
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    service.sync(window_hours=48, max_messages=5)
+    # No cursor was written, so the next normal pass is still the initial one.
+    fake_server.commands.clear()
+    report = service.sync()
+    assert report.mode == "initial"
+
+
+def test_bounded_pass_sends_no_mail_body_to_stdout(fake_server, monkeypatch, capsys):
+    """Requirement: 不将邮件正文或敏感信息写入日志."""
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    report = service.sync(window_hours=48, max_messages=5)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    # The body really was read into memory, so the assertion above is meaningful.
+    assert any(BODY_MARKER in a.record.body_text for a in report.analyses)
+    # And it is absent from the report's own summary and from every warning.
+    assert BODY_MARKER not in report.describe_scope
+    assert all(BODY_MARKER not in warning for warning in report.warnings)
+    assert BODY_MARKER not in repr(report.rejections)
+
+
+def test_bounded_pass_still_refuses_to_fetch_forbidden_operations(fake_server, monkeypatch):
+    """The bounded mode must not open a shortcut around the read-only contract."""
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    adapter = direct_adapter(fake_server)
+    try:
+        adapter.fetch_since(DEFAULT_FOLDER, 0, limit=5,
+                            since_date=fixed_now - timedelta(hours=48))
+    finally:
+        adapter.close()
+    assert adapter.operations == ["fetch_since", "close"]
+    assert all(operation in ALLOWED_OPERATIONS for operation in adapter.operations)
+
+
+def test_bounded_pass_keeps_mail_content_out_of_every_repr(fake_server, monkeypatch):
+    """Requirement: 不将邮件正文或敏感信息写入日志.
+
+    A dataclass repr is what ends up in a traceback or a log line, so the fields
+    that carry personal content must not appear in it. They stay fully readable
+    through normal attribute access — this is about accidental exposure.
+    """
+    from pku_deadline_agent import email_sync as sync_module
+
+    fixed_now = datetime(2026, 11, 11, 9, 0, tzinfo=BEIJING)
+    monkeypatch.setattr(sync_module, "beijing_now", lambda: fixed_now)
+    fake_server.mailboxes[DEFAULT_FOLDER] = bounded_mailbox(fixed_now)
+
+    service = make_service(fake_server, store_with(fake_server))
+    report = service.sync(window_hours=48, max_messages=5)
+    analysis = report.analyses[0]
+    record = analysis.record
+
+    exposed = (repr(report), repr(analysis), repr(record),
+               repr(analysis.deadlines))
+    for text in exposed:
+        assert BODY_MARKER not in text, text
+        assert "bounded-1@pku.edu.cn" not in text, text
+        assert "student@stu.pku.edu.cn" not in text, text
+    # The values are still fully available to the page that displays them.
+    assert BODY_MARKER in record.body_text
+    assert record.sender and record.message_id
+    assert BODY_MARKER not in repr(analysis.deadlines)
+    assert any(deadline.source_snippet for deadline in analysis.deadlines)
+    assert all(BODY_MARKER not in repr(deadline) for deadline in analysis.deadlines)
 
 
 def test_uidvalidity_reset_warns_and_reruns_initial(fake_server):

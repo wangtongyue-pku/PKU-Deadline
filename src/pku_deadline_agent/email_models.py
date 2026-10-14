@@ -89,21 +89,27 @@ class RawEmailRecord:
 
     ``uid`` is unique only together with ``(folder, uidvalidity)``; the stable
     cross-session identity is ``message_id`` when the sender provided one.
+
+    The three personal fields are excluded from ``repr``: a dataclass repr ends
+    up in tracebacks and log lines, and mail bodies are exactly what must never
+    be written to a log. This is the same convention the project already uses for
+    ``deadline_text`` and ``sanitized_text``; the values stay fully readable
+    through normal attribute access.
     """
 
     uid: int
     folder: str
     uidvalidity: int
-    message_id: str
-    sender: str
-    recipients: tuple[str, ...]
+    message_id: str = field(repr=False)
+    sender: str = field(repr=False)
+    recipients: tuple[str, ...] = field(repr=False)
     subject: str
     sent_at: datetime | None          # tz-aware, converted to Asia/Shanghai
-    body_text: str                    # bounded plain text, untrusted, never executed
+    body_text: str = field(repr=False)   # bounded plain text, untrusted, never executed
     body_truncated: bool
     has_attachments: bool
     raw_size: int
-    sender_name: str = ""             # display name only; the address stays in sender
+    sender_name: str = field(default="", repr=False)   # display name; address stays in sender
 
     @property
     def stable_key(self) -> str:
@@ -131,7 +137,7 @@ class EmailDeadline:
     kind: str
     due_at: datetime | None
     raw_text: str
-    source_snippet: str
+    source_snippet: str = field(repr=False)   # a fragment of the body: never logged
     needs_confirmation: bool
 
     def __post_init__(self) -> None:
@@ -155,7 +161,7 @@ class EmailAnalysis:
     record: RawEmailRecord
     category: str
     category_reason: str
-    deadlines: tuple[EmailDeadline, ...] = field(default_factory=tuple)
+    deadlines: tuple[EmailDeadline, ...] = field(default_factory=tuple, repr=False)
     importance: str = IMPORTANCE_LOW
     importance_reasons: tuple[str, ...] = field(default_factory=tuple)
     action_needed: bool = False

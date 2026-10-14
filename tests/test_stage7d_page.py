@@ -400,7 +400,6 @@ def test_demo_mode_is_the_default_so_no_account_is_needed(repo, monkeypatch):
 
 def test_demo_inbox_parses_cleanly_and_states_distinct_dates():
     """The fixture itself must be sound, or the demo teaches the wrong thing.
-
     Two properties matter and both were wrong once: no message may carry a
     parsing warning, and a mail that states an event *and* its registration
     deadline must state two different dates (they are not the same day, and a
@@ -433,3 +432,146 @@ def test_demo_inbox_parses_cleanly_and_states_distinct_dates():
         for deadline in analysis.deadlines:
             if deadline.due_at is not None:
                 assert deadline.due_at > now, (analysis.record.subject, deadline.kind)
+
+
+# ------------------------------------------------------- bounded read (7E step 2)
+
+
+class RecordingMailbox:
+    """Wraps the demo mailbox so a test can see exactly what the page asked for.
+
+    ``fetch_since`` is the only body reader in the read-only contract, so
+    recording its arguments is enough to prove the scope the page enforced.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._inner = None
+
+    def __call__(self):
+        from pku_deadline_agent.email_demo import demo_mailbox
+
+        if self._inner is None:
+            self._inner = demo_mailbox()
+        adapter = self._inner
+        recorder = self
+
+        class _Proxy:
+            uidvalidity = adapter.uidvalidity
+            operations = adapter.operations
+
+            def list_folders(self):
+                return adapter.list_folders()
+
+            def fetch_since(self, folder, since_uid, *, limit=50, since_date=None):
+                recorder.calls.append({"folder": folder, "since_uid": since_uid,
+                                       "limit": limit, "since_date": since_date})
+                return adapter.fetch_since(folder, since_uid, limit=limit,
+                                           since_date=since_date)
+
+            def fetch_uids(self, folder, uids):
+                return adapter.fetch_uids(folder, uids)
+
+            def close(self):
+                return adapter.close()
+
+        return _Proxy()
+
+
+def bounded_run(app, *, hours=None, cap=None, acknowledge=True):
+    if hours is not None:
+        app.number_input(key="email_bounded_hours").set_value(hours).run()
+    if cap is not None:
+        app.number_input(key="email_bounded_max").set_value(cap).run()
+    if acknowledge:
+        app = _check(app, "email_bounded_ack")
+    return _click(app, "email_bounded_run")
+
+
+def test_bounded_read_needs_an_explicit_acknowledgement(repo, monkeypatch):
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    button = [item for item in app.button if item.key == "email_bounded_run"]
+    assert button and button[0].disabled is True
+    app = _check(app, "email_bounded_ack")
+    assert [item for item in app.button if item.key == "email_bounded_run"][0].disabled is False
+
+
+def test_bounded_read_asks_for_exactly_the_stated_scope(repo, monkeypatch):
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    app = bounded_run(app, hours=48, cap=5)
+    assert not app.exception, app.exception
+    # The only body read is the bounded one, and it carries the stated range.
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["folder"] == "INBOX"
+    assert call["since_uid"] == 0
+    assert call["limit"] == 5
+    from datetime import timedelta
+
+    from pku_deadline_agent.time_utils import beijing_now
+
+    delta = beijing_now() - call["since_date"]
+    assert timedelta(hours=47, minutes=55) <= delta <= timedelta(hours=48, minutes=5)
+
+
+def test_bounded_read_never_writes_tasks_or_moves_the_cursor(repo, monkeypatch):
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    app = bounded_run(app)
+    assert not app.exception, app.exception
+    assert repo.list_tasks() == []
+    assert recorder.calls, "受限读取应确实读过邮件"
+    # No cursor was written: the session holds no mailbox state after the pass.
+    assert app.session_state.get("email_state_store") is not None
+    state = app.session_state["email_state_store"].get("INBOX")
+    assert state is None, "受限试读不得留下增量游标"
+
+
+def test_bounded_read_reports_its_scope_and_writes_nothing(repo, monkeypatch):
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    app = bounded_run(app)
+    assert not app.exception, app.exception
+    # on_click runs before the script body, so the summary is already on screen.
+    assert any("受限读取：最近 48 小时" in item.value for item in app.info)
+    assert any("没有创建或修改任何任务" in item.value for item in app.info)
+    assert repo.list_tasks() == []
+    assert repo.source_mappings("email") == {}
+
+
+def test_bounded_read_failure_is_reported_by_its_kind(repo, monkeypatch):
+    from pku_deadline_agent.email_adapter import EmailAuthRequired
+
+    def broken():
+        raise EmailAuthRequired("虚构的授权码失效")
+
+    app = open_page(repo, monkeypatch, factory=broken)
+    app = bounded_run(app)
+    assert not app.exception, app.exception
+    assert any("登录被拒绝" in item.value for item in app.error)
+    assert repo.list_tasks() == []
+
+
+def test_bounded_read_cap_cannot_exceed_the_batch_ceiling(repo, monkeypatch):
+    """The widget itself refuses to promise more than the adapter's hard cap."""
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    widget = app.number_input(key="email_bounded_max")
+    assert widget.max is not None
+    from pku_deadline_agent.email_adapter import DEFAULT_FETCH_LIMIT
+
+    assert float(widget.max) == float(DEFAULT_FETCH_LIMIT)
+
+
+def test_normal_sync_still_writes_nothing_and_stays_separate(repo, monkeypatch):
+    """The regular button keeps its own scope; the bounded one is separate."""
+    recorder = RecordingMailbox()
+    app = open_page(repo, monkeypatch, factory=recorder)
+    app = _click(app, "email_sync")
+    assert not app.exception, app.exception
+    assert len(recorder.calls) == 1
+    # A regular initial pass asks for the whole 7-day window, not 48 hours.
+    assert recorder.calls[0]["limit"] == 30
+    assert repo.list_tasks() == []

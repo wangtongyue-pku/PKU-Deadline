@@ -79,6 +79,10 @@ MODE_REAL = "真实邮箱（只读 IMAP）"
 # Session key that may hold an offline mailbox factory for the demo mode.
 DEMO_FACTORY_KEY = "email_demo_factory"
 
+# Defaults for the one-off bounded read: small enough to state in one sentence.
+BOUNDED_HOURS_DEFAULT = 48
+BOUNDED_MAX_DEFAULT = 5
+
 WINDOW_CHOICES = TIME_WINDOWS
 
 
@@ -101,6 +105,13 @@ class EmailPageDependencies:
 
 def build_dependencies(mode: str, *, state_store=None) -> EmailPageDependencies:
     """Real or demo wiring. The demo path never reaches the network."""
+    # The sync state (UID cursor, failed UIDs) must outlive a single script run,
+    # or every pass would look like a first pass and "incremental" would never
+    # happen. It lives in the session, next to the credentials.
+    state_store = state_store or st.session_state.get("email_state_store")
+    if state_store is None:
+        state_store = MailboxStateStore()
+        st.session_state["email_state_store"] = state_store
     if mode == MODE_REAL:
         credentials = st.session_state.get("email_credentials")
         if credentials is None:
@@ -112,19 +123,19 @@ def build_dependencies(mode: str, *, state_store=None) -> EmailPageDependencies:
                 credentials, RealImapAdapter, host=IMAP_HOST, port=IMAP_PORT, timeout=30.0
             ),
             credentials=credentials,
-            state_store=state_store or MailboxStateStore(),
+            state_store=state_store,
             label=f"{IMAP_HOST}:{IMAP_PORT}（只读）",
         )
     # Demo branch only: an override lets tests (and future previews) supply a
     # different offline mailbox without reaching into module globals, which
-    # Streamlit's script re-imports can silently reset. The real branch below
+    # Streamlit's script re-imports can silently reset. The real branch above
     # never consults it, so a planted value cannot redirect a real connection.
     override = st.session_state.get(DEMO_FACTORY_KEY)
     return EmailPageDependencies(
         mode=mode,
         adapter_factory=override or demo_mailbox,
-        credentials=SessionCredentialStore(),
-        state_store=state_store or MailboxStateStore(),
+        credentials=st.session_state.get("email_credentials") or SessionCredentialStore(),
+        state_store=state_store,
         label="演示收件箱（虚构邮件）",
     )
 
@@ -178,6 +189,9 @@ def _reset_sync_state(dependencies: EmailPageDependencies) -> None:
                 "email_generation", "email_plan_signature", "email_rendered_plan"):
         st.session_state.pop(key, None)
     dependencies.state_store.reset(DEFAULT_FOLDER)
+    # Drop the state object itself too: after a disconnect nothing about the
+    # mailbox should survive in the session.
+    st.session_state.pop("email_state_store", None)
 
 
 def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
@@ -197,8 +211,10 @@ def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
         _run_sync(repository, dependencies)
     if columns[2].button("断开连接", key="email_disconnect"):
         _disconnect(dependencies)
-    columns[3].caption(f"范围：INBOX 最近 {INITIAL_DAYS} 天、最多 {INITIAL_MAX} 封"
+    columns[3].caption(f"常规范围：INBOX 最近 {INITIAL_DAYS} 天、最多 {INITIAL_MAX} 封"
                        f"（单批硬上限 {DEFAULT_FETCH_LIMIT} 封）")
+
+    _render_bounded_sync(repository, dependencies)
 
     with st.expander("这个功能会做什么、不会做什么", expanded=False):
         st.write("- **只读**：只列出文件夹、按 UID 读取邮件内容（`BODY.PEEK`），"
@@ -226,6 +242,37 @@ def _render_connection(repository, dependencies: EmailPageDependencies) -> None:
         st.session_state["email_plan"] = plan
     _render_plan(repository, report, plan)
     _render_rules()
+
+
+def _render_bounded_sync(repository, dependencies: EmailPageDependencies) -> None:
+    """A one-off pass with a scope the user states: hours back, message cap.
+
+    Kept separate from 「同步邮件」 on purpose. The two differ in what they read,
+    so they must be separate decisions: this one is for a first look at real
+    mail with a scope small enough to state in one sentence. It ignores the UID
+    cursor and leaves it untouched, so it cannot change what a later normal sync
+    reads, and it still writes nothing to the task database.
+    """
+    with st.expander("受限试读（指定时间范围与封数，适合首次真实读取）", expanded=False):
+        st.caption("这一项**会读取邮件正文**（只读、不标记已读、不发送）。"
+                   "它不改动增量游标，也不会创建或修改任何任务。")
+        columns = st.columns(3)
+        hours = columns[0].number_input("只看最近多少小时", min_value=1, max_value=24 * 30,
+                                        value=BOUNDED_HOURS_DEFAULT, step=1,
+                                        key="email_bounded_hours")
+        cap = columns[1].number_input("最多读取几封", min_value=1,
+                                      max_value=DEFAULT_FETCH_LIMIT,
+                                      value=BOUNDED_MAX_DEFAULT, step=1,
+                                      key="email_bounded_max")
+        columns[2].caption(f"文件夹固定为 {DEFAULT_FOLDER}；"
+                           f"单批硬上限 {DEFAULT_FETCH_LIMIT} 封。")
+        acknowledged = st.checkbox(
+            f"我同意本次只读读取 {DEFAULT_FOLDER} 最近 {int(hours)} 小时、最多 {int(cap)} 封邮件的正文",
+            key="email_bounded_ack",
+        )
+        st.button("开始受限试读", disabled=not acknowledged, key="email_bounded_run",
+                  on_click=_run_sync, args=(repository, dependencies),
+                  kwargs={"window_hours": float(hours), "max_messages": int(cap)})
 
 
 def _render_credentials(dependencies: EmailPageDependencies) -> None:
@@ -311,15 +358,19 @@ def _check_connection(dependencies: EmailPageDependencies) -> None:
     _remember("email_info", f"连接正常，可读取的文件夹：{'、'.join(folders) or '（无）'}。")
 
 
-def _run_sync(repository, dependencies: EmailPageDependencies) -> None:
+def _run_sync(repository, dependencies: EmailPageDependencies, *,
+              window_hours: float | None = None,
+              max_messages: int | None = None) -> None:
     st.session_state.pop("email_error", None)
     if dependencies.mode == MODE_REAL and dependencies.credentials.get() is None:
         _remember("email_error", "请先在上方保存邮箱地址与客户端授权码（仅保存在本次运行内存中）。")
         return
     service = _service(dependencies)
+    scope = (f"最近 {int(window_hours)} 小时、最多 {max_messages} 封"
+             if window_hours else "按常规范围")
     try:
-        with st.spinner("正在只读读取邮件…"):
-            report = service.sync()
+        with st.spinner(f"正在只读读取邮件（{scope}）…"):
+            report = service.sync(window_hours=window_hours, max_messages=max_messages)
     except EmailAuthRequired as error:
         _remember("email_error", f"登录被拒绝：{error} 请核对授权码，或确认邮箱已开启 IMAP。")
         return
@@ -342,8 +393,8 @@ def _run_sync(repository, dependencies: EmailPageDependencies) -> None:
     st.session_state.pop("email_plan", None)
     st.session_state.pop("email_digest", None)
     _remember("email_info",
-              f"同步完成：读取 {len(report.analyses)} 封（{report.mode}），"
-              f"分类与每日情报见下方。数据库尚未写入，请核对后确认导入。")
+              f"同步完成：{report.describe_scope}。分类与每日情报见下方。"
+              "数据库尚未写入，也没有创建或修改任何任务；请核对后自行决定是否导入。")
 
 
 def _disconnect(dependencies: EmailPageDependencies) -> None:

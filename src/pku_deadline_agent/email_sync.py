@@ -13,7 +13,7 @@ never assumed lost, and nothing on the local side is deleted.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
 from pku_deadline_agent.email_adapter import (
@@ -58,15 +58,28 @@ class EmailSyncReport:
     """What one sync pass produced — shown to the user before anything is written."""
 
     folder: str
-    mode: str                      # "initial", "incremental" or "retry"
+    mode: str                      # "initial", "incremental", "retry" or "bounded"
     uidvalidity: int
     highest_uid: int
-    analyses: tuple[EmailAnalysis, ...]
+    analyses: tuple[EmailAnalysis, ...] = field(repr=False)
     has_more: bool
     rejections: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
     retried_uids: tuple[int, ...] = field(default_factory=tuple)
     still_failed_uids: tuple[int, ...] = field(default_factory=tuple)
+    window_hours: float | None = None   # set only for a bounded test pass
+    excluded_older_count: int = 0    # dropped locally as outside the stated window
+
+    @property
+    def describe_scope(self) -> str:
+        """What this pass actually asked the server for, in one line."""
+        if self.mode == "bounded":
+            hours = int(self.window_hours) if self.window_hours else 0
+            text = f"受限读取：最近 {hours} 小时、最多 {len(self.analyses)} 封"
+            if self.excluded_older_count:
+                text += f"（另有 {self.excluded_older_count} 封超出该范围，已在本地剔除）"
+            return text
+        return f"模式 {self.mode}｜读取 {len(self.analyses)} 封"
 
     @property
     def trustworthy(self) -> bool:
@@ -105,9 +118,21 @@ class EmailSyncService:
 
     # -- public -----------------------------------------------------------
 
-    def sync(self, folder: str = DEFAULT_FOLDER, *, retry_failed: bool = True) -> EmailSyncReport:
+    def sync(self, folder: str = DEFAULT_FOLDER, *, retry_failed: bool = True,
+             window_hours: float | None = None,
+             max_messages: int | None = None) -> EmailSyncReport:
         """One pass. Failed-parse messages from earlier passes are retried first
-        (recorded, never silently skipped), then the normal incremental run."""
+        (recorded, never silently skipped), then the normal incremental run.
+
+        Passing ``window_hours`` switches to a **bounded** pass instead: it reads
+        at most ``max_messages`` messages from that many hours back, ignores the
+        stored cursor, and does not touch it afterwards. That is what a first
+        real-mailbox test needs — a scope the user can state in one sentence —
+        while the normal modes keep their own fixed limits (initial: 7 days / 30
+        messages; incremental: by UID).
+        """
+        if window_hours is not None:
+            return self._run_bounded(folder, window_hours, max_messages)
         state = self._state.get(folder)
         if state is None:
             report = self._run_initial(folder)
@@ -121,7 +146,41 @@ class EmailSyncService:
         """Forget the cursor (user action); the next sync re-runs initial."""
         self._state.reset(folder)
 
-    # -- internals --------------------------------------------------------
+    def _run_bounded(self, folder: str, window_hours: float,
+                     max_messages: int | None) -> EmailSyncReport:
+        """A pass with an explicit, one-off window and message cap.
+
+        Deliberately leaves the incremental cursor untouched: this is a test of a
+        stated scope, not the beginning of ongoing synchronisation, and it must
+        not affect what a later normal sync reads.
+
+        Two independent guards apply, because they answer different questions:
+        the server-side ``SINCE`` bounds which messages are *asked for*, and the
+        per-message check below drops anything outside the window that the server
+        returned anyway (``SINCE`` matches on the arrival date at day
+        granularity, so it can hand back a message sent slightly earlier).
+        """
+        limit = max(1, int(max_messages)) if max_messages else self._batch_limit
+        since = beijing_now() - timedelta(hours=float(window_hours))
+        adapter = self._adapter_factory()
+        try:
+            result = adapter.fetch_since(folder, 0, limit=limit, since_date=since)
+        finally:
+            adapter.close()
+
+        inside = tuple(
+            record for record in result.records
+            if record.sent_at is None or record.sent_at >= since
+        )
+        excluded = len(result.records) - len(inside)
+        # The exclusion is *not* a warning: the user asked for this window, so
+        # dropping an older message is the scope working, not a data problem.
+        # A warning here would mark the batch untrustworthy and block the whole
+        # import plan — including the messages that are inside the window.
+        filtered = replace(result, records=inside)
+        return self._finish(folder, filtered, mode="bounded",
+                            window_hours=window_hours, keep_state=True,
+                            excluded_older_count=excluded)
 
     def _run_initial(self, folder: str) -> EmailSyncReport:
         since = beijing_now() - timedelta(days=self._initial_days)
@@ -163,8 +222,26 @@ class EmailSyncService:
             return report
         return self._finish(folder, result, mode="incremental")
 
-    def _finish(self, folder: str, result, mode: str) -> EmailSyncReport:
+    def _finish(self, folder: str, result, mode: str,
+                window_hours: float | None = None,
+                keep_state: bool = False,
+                excluded_older_count: int = 0) -> EmailSyncReport:
         analyses = tuple(analyze_email(record) for record in result.records)
+        if keep_state:
+            # A bounded test pass observes the mailbox; it must not move the
+            # cursor or inherit failures into the ongoing state.
+            return EmailSyncReport(
+                folder=folder,
+                mode=mode,
+                uidvalidity=result.uidvalidity,
+                highest_uid=result.highest_uid,
+                analyses=analyses,
+                has_more=result.has_more,
+                rejections=tuple(result.rejections),
+                warnings=tuple(result.warnings),
+                window_hours=window_hours,
+                excluded_older_count=excluded_older_count,
+            )
         # Cursor advances past failures, but they are *recorded* on the state so
         # a later pass retries them: one bad message never blocks the others,
         # and none is silently lost.

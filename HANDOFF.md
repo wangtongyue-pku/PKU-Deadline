@@ -1,5 +1,36 @@
 # Codex / DSH 交接记录
 
+## 第七阶段 7E：真实邮箱联调（DSH，2026-10-13，进行中）
+
+**用户已在自己的账号上完成首次真实登录与只读连接（「检查连接」成功）。** 本轮尚未读取任何真实邮件。
+
+### 本轮新增（为受限读取做准备）
+
+- **受限试读（bounded pass）**：`EmailSyncService.sync(window_hours=…, max_messages=…)`。它不使用也不写入增量游标，因此不会改变后续常规同步读取的内容；报告 `mode="bounded"`，并带 `window_hours`、`excluded_older_count` 与 `describe_scope`。
+- **页面入口**「受限试读」：只在勾选明确同意后可用，默认值为**最近 48 小时、最多 5 封**；单封上限受 `DEFAULT_FETCH_LIMIT` 约束（控件 max 即为该值）。文件夹固定 INBOX。
+- **两道范围闸门**：服务器端 `SINCE` 先把范围缩小；本地再按 `sent_at` 逐封剔除窗口外的邮件，因为 IMAP `SINCE` 只精确到「日」，可能返回略早于窗口的邮件。
+- `scripts/check_migration.py`：在**只读在线备份副本**上预演 v3→v4 迁移，逐表逐行比对。
+- `scripts/check_restricted_read.py`：用真实 `RealImapAdapter` 对假服务器重演受限读取，逐条核对 8 项约束。
+
+### 本轮修复的真实缺陷（均有测试钉住）
+
+1. **正文会经 `repr` 泄漏到日志**：`repr(EmailSyncReport)` 会带出 `RawEmailRecord.body_text`；异常追踪或日志行一旦打印报告就会写出正文。现在 `body_text` / `sender` / `recipients` / `message_id` / `sender_name`、`EmailDeadline.source_snippet`、`EmailAnalysis.deadlines`、`EmailSyncReport.analyses` 全部 `repr=False`（沿用项目对 `deadline_text`、`sanitized_text` 的既有约定），字段本身仍可正常读取。
+2. **本地剔除被记成 warning，反而挡住整个方案**：服务器 `SINCE` 精度到天会返回略早的邮件，原先把「已剔除」写成 warning，导致 `trustworthy=False`，**连窗口内的邮件也无法生成导入方案**。剔除是用户指定的范围，不是数据问题，现在单独计入 `excluded_older_count` 并在页面上如实显示。
+3. **页面每次 rerun 都新建状态存储**：`EmailSyncService` 的 `MailboxStateStore` 原先在 `build_dependencies` 里新建，导致**增量模式从未真正生效**（每次都当首次）。现在状态存放在会话里；「断开连接」会连同状态对象一起清除。
+
+### 验证
+
+- **全量 827 项通过**（7D 后 811 + 本轮 16）。
+- **迁移预检**：对真实库（13 任务 / 13 历史 / 11 来源映射 / 13 提取）的只读副本运行，六张表**逐行完全一致**，备份已生成，二次运行无变化，原库仍停在 v3 → `MIGRATION_SAFE`。
+- **受限读取预演**：18 项约束全部 PASS → `RESTRICTED_READ_SAFE`。含 EXAMINE 而非 SELECT、`BODY.PEEK[]`、线上无任何状态修改命令、正文 / Message-ID / 授权码不出现在 stdout 或任何日志与 repr 中、不写任务、不留游标。
+- **边界**：预演与测试全部使用虚构邮件与本地假服务器；**未读取真实邮件**。
+
+### 用户为本轮设定的授权范围（7E 第二部分）
+
+仅 INBOX；最近 48 小时内最多 5 封；严格只读、不改已读状态；不向任何第三方 AI 发送真实邮件；只在本地展示分类 / 重要程度 / 摘要 / 日期；不自动创建或修改 Deadline；保留原邮件来源便于人工核对；正文与敏感信息不写入日志。
+
+**状态**：代码与离线验证已完成，**等待用户确认后在真实邮箱上执行**。受限读取会取邮件正文，属于新的授权范围。
+
 ## 第七阶段 7D：学校邮箱页面接入（DSH，2026-10-13）
 
 **7D 已完成。本轮没有登录任何真实邮箱，没有发出任何 AI 请求，也没有启动后台自动同步。**
