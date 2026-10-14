@@ -1,4 +1,4 @@
-# Deadline
+# PKU Deadline
 
 > **本项目由 AI 编写。** 代码、测试和文档都是在 AI 编程助手（Claude / Codex / DeepSeek Harness）的协助下生成的，人类负责提出需求、审核结果并在真实环境里验证。功能已在自己的账号上跑通，但**请自行判断是否可信**，重要数据务必保留备份。
 
@@ -37,7 +37,7 @@
 - 「校园情报」看板可按分类、重要程度、时间和关键字筛选，并显示被筛掉了几封；低重要程度的邮件只是排在后面，不会消失。
 - 邮箱页可直接选择「使用 AI 辅助提取」，无需复制到别的页面；主题与正文先本地筛选 / 脱敏，仅任务片段可上传，邮件头与附件不上传。
 - 报名 / 作业 / 材料截止可批量保存；活动举办时间只展示。只有日期没有时刻的表达保持待确认，绝不补成午夜；**不会因为同步失败而删除任何已有任务**。
-- 可以纠正分类和重要程度，修正会立即反映到看板上。AI 部分**只准备最小载荷、不发送**：正文与附件永远不进入载荷。
+- 可以纠正分类和重要程度，修正会立即反映到看板上。AI 仅接收审核后的必要任务片段，完整原始正文与附件不上传。
 
 **提醒与备份**
 
@@ -50,8 +50,8 @@
 需要 Python 3.11+。
 
 ```powershell
-git clone https://github.com/wangtongyue-pku/deadline.git
-cd deadline
+git clone https://github.com/wangtongyue-pku/PKU-Deadline.git
+cd PKU-Deadline
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```

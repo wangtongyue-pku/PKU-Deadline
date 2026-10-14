@@ -19,8 +19,8 @@ from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin
 
 
 def main() -> None:
-    st.set_page_config(page_title="Deadline", page_icon="📅", layout="wide")
-    st.title("Deadline")
+    st.set_page_config(page_title="PKU Deadline", page_icon="📅", layout="wide")
+    st.title("PKU Deadline")
     st.caption("所有日期均为北京时间 Asia/Shanghai")
 
     with st.sidebar:
