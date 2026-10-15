@@ -1,0 +1,27 @@
+{
+  "format": "pku-deadline.zhihuishu.v1",
+  "courses": [
+    {
+      "course_id": "fictional-course-aaaa",
+      "enrollment_id": "fictional-term-aaaa",
+      "name": "虚构通识课甲",
+      "tasks": [
+        {"id": "fictional-end-aaaa", "kind": "course_end", "title": "虚构课程结束", "deadline": "2026-12-31T23:59:00+08:00"},
+        {"id": "fictional-study-aaaa", "kind": "study_deadline", "title": "虚构课程学习", "deadline": "2026-12-15T20:00:00+08:00", "requirements": "完成课程列出的学习要求；不以课程结束时间替代。"},
+        {"id": "fictional-video-aaaa", "kind": "video", "title": "虚构第一章视频", "deadline": "2026-11-10T20:00:00+08:00", "status": "未完成", "source_url": "https://example.invalid/course-aaaa/videos"},
+        {"id": "fictional-test-aaaa", "kind": "chapter_test", "title": "虚构第一章测试", "deadline": "2026-11-12T20:00:00+08:00", "status": "已完成"},
+        {"id": "fictional-homework-aaaa", "kind": "homework", "title": "虚构课程报告", "deadline": "2026-11-20T20:00:00+08:00"},
+        {"id": "fictional-exam-aaaa", "kind": "exam", "title": "虚构期末考试", "opens_at": "2026-12-16T08:00:00+08:00", "deadline": "2026-12-20T20:00:00+08:00", "status": "平台未知状态", "source_url": "https://example.invalid/course-aaaa/exam-list"}
+      ]
+    },
+    {
+      "course_id": "fictional-course-bbbb",
+      "enrollment_id": "fictional-term-aaaa",
+      "name": "虚构通识课乙",
+      "tasks": [
+        {"id": "fictional-video-bbbb", "kind": "video", "title": "虚构第一章视频", "deadline": "2026-11-15"},
+        {"id": "fictional-homework-bbbb", "kind": "homework", "title": "虚构未公布时间作业"}
+      ]
+    }
+  ]
+}
