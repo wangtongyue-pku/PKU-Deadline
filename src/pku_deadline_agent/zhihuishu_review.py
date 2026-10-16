@@ -1,18 +1,22 @@
 """Local comparison and simulated decisions; no database writer or AI client."""
 
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 import hashlib
 import json
 
 from pku_deadline_agent.extraction import ExtractedTask
 from pku_deadline_agent.models import Task
 from pku_deadline_agent.task_management import ImportDecision, MatchSuggestion, find_matches, identity
-from pku_deadline_agent.time_utils import normalize_datetime
+from pku_deadline_agent.time_utils import BEIJING, normalize_datetime
 from pku_deadline_agent.zhihuishu_reader import ReadTask, possible_matches
 from pku_deadline_agent.zhihuishu_scroll import ScrollReport
 
 CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
 UNKNOWN_DEADLINE = '截止日期或时刻缺失，不自动补造'
+# Sibling candidates only need stable fields for the shared matcher; they are
+# never stored or compared for identity.
+SIBLING_STAMP = datetime.min.replace(tzinfo=BEIJING)
 
 # Where a preview's data came from. The reader stamps every report with one of
 # these; the page labels the origin honestly, and the sandbox import path only
@@ -67,6 +71,12 @@ def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
     if len(report.tasks) > 20:
         raise ValueError('预览累计最多 20 条任务。')
     local = tuple(t for t in tasks if t.deleted_at is None)
+    # Sibling candidates as plain Tasks, so the preview can ask the SAME matcher
+    # the write transaction uses. Without this the conflict only appears after the
+    # user has already confirmed twice, as a rolled-back batch.
+    siblings = tuple(Task(index + 1, task.title, task.course or '', '作业', task.deadline,
+                          'zhihuishu', False, SIBLING_STAMP, SIBLING_STAMP)
+                     for index, task in enumerate(report.tasks))
     items = []
     for index, task in enumerate(report.tasks):
         warnings = []
@@ -81,13 +91,30 @@ def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
         candidate = ExtractedTask(index+1, task.title, task.course or '', '作业',
                                   None, task.deadline, False, ())
         matches = find_matches(candidate, list(local), {}) if task.title.strip() else ()
-        peers = tuple(i+1 for i in possible_matches(task, report.tasks) if i != index)
+        peers = batch_peers(index + 1, task, candidate, siblings, report.tasks)
         category = ('信息不足' if warnings else
                     '疑似截止时间变更' if any(m.kind == 'deadline_change' for m in matches) else
                     '可能重复' if matches or peers else '待新增')
         items.append(ReviewItem(index+1, task, category, matches, tuple(warnings), peers))
     digest = fingerprint({'report': asdict(report), 'local': [asdict(t) for t in local]})
     return ReviewSnapshot(report, tuple(items), local, digest)
+
+
+def batch_peers(index: int, task: ReadTask, candidate: ExtractedTask,
+                siblings: tuple[Task, ...], batch: tuple[ReadTask, ...]) -> tuple[int, ...]:
+    """Batch positions the WRITE-TIME matcher would call similar to this one.
+
+    Two rules, both reusing existing code so preview and transaction agree:
+    exact namesakes (``possible_matches``, which ignores dates) and the shared
+    conservative similarity rule (``find_matches``). Flagging them here lets the
+    user confirm "still separate tasks" BEFORE the batch is prepared, instead of
+    discovering it as a rollback after two confirmations. Suggestions only: the
+    positions are never identity and never merge anything.
+    """
+    exact = {i + 1 for i in possible_matches(task, batch) if i != index - 1}
+    others = [item for item in siblings if item.id != index]
+    similar = {match.task.id for match in find_matches(candidate, others, {})}
+    return tuple(sorted(exact | similar))
 
 
 @dataclass(frozen=True)

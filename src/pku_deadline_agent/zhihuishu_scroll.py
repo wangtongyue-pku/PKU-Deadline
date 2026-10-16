@@ -51,6 +51,10 @@ class ScrollCoverage:
     completeness_basis: str
     unread_minimum: int
     reasons: tuple[str, ...]
+    # Per-code counts of the reader's own issues (never task text or identities).
+    # Without them a partial read says "fields incomplete" but not WHY, and the
+    # next authorized read would have to guess which field failed to bind.
+    issue_counts: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,7 @@ class BoundedScrollReader:
         collected: dict[int, ReadTask] = {}
         seen: set[int] = set()
         reasons: list[str] = []
+        issue_tally: dict[str, int] = {}
         course = None
         total = None
         loaded_peak = loaded_final = scrolls = stable_bottom = 0
@@ -207,6 +212,8 @@ class BoundedScrollReader:
                     continue
                 unstable_attempts = 0
                 geometry = probe()
+                for issue in report.issues:
+                    issue_tally[issue.code] = issue_tally.get(issue.code, 0) + 1
                 loaded_final = report.coverage.loaded_count
                 has_next_observed = has_next_observed or report.coverage.has_next is True
                 end_visible = geometry['end_visible']
@@ -322,7 +329,8 @@ class BoundedScrollReader:
         lower_bound = total if total is not None else (loaded_peak if policy.mode != 'virtual' else len(seen))
         coverage = ScrollCoverage(total, loaded_peak, loaded_final, len(seen), len(tasks), scrolls,
                                   bottom_settled, inventory, fields, inventory and fields, basis,
-                                  max(0, lower_bound - len(seen)), tuple(dict.fromkeys(reasons)))
+                                  max(0, lower_bound - len(seen)), tuple(dict.fromkeys(reasons)),
+                                  tuple(sorted(issue_tally.items())))
         return ScrollReport(tasks, coverage, course, evidence)
 
 

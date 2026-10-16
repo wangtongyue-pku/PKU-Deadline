@@ -75,7 +75,14 @@ def decode_report(payload) -> ScrollReport:
     reasons = coverage_raw['reasons']
     if not isinstance(reasons, (list, tuple)) or not all(isinstance(r, str) for r in reasons):
         raise ValueError('读取结果的完整性原因无效。')
-    coverage = ScrollCoverage(**(coverage_raw | {'reasons': tuple(reasons)}))
+    issue_counts = coverage_raw['issue_counts']
+    if not isinstance(issue_counts, (list, tuple)) or not all(
+            isinstance(pair, (list, tuple)) and len(pair) == 2
+            and isinstance(pair[0], str) and isinstance(pair[1], int)
+            for pair in issue_counts):
+        raise ValueError('读取结果的异常计数无效。')
+    coverage = ScrollCoverage(**(coverage_raw | {'reasons': tuple(reasons),
+                                                 'issue_counts': tuple(tuple(p) for p in issue_counts)}))
     tasks_raw = payload.get('tasks')
     if not isinstance(tasks_raw, list):
         raise ValueError('读取结果的任务列表无效。')

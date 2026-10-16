@@ -1,6 +1,7 @@
 """The real-read bridge carries display fields only, never identity or links."""
 
 import json
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -52,6 +53,7 @@ def test_round_trip_keeps_only_the_display_fields():
     (lambda p: p.update(version=99), '版本不匹配'),
     (lambda p: p.update(evidence='mystery'), '来源标记'),
     (lambda p: p['coverage'].pop('reasons'), '覆盖度字段'),
+    (lambda p: p['coverage'].update(issue_counts=[['deadline_missing']]), '异常计数'),
     (lambda p: p['tasks'][0].update(source_url='https://example.invalid/x'), '未允许字段'),
     (lambda p: p['tasks'][0].update(deadline='2034-06-10T20:00:00'), '缺少时区'),
     (lambda p: p['tasks'][0].update(deadline='not-a-date'), None),
@@ -64,6 +66,16 @@ def test_decode_refuses_anything_outside_the_whitelist(mutate, message):
         decode_report(payload)
     if message:
         assert message in str(error.value)
+
+
+def test_issue_counts_survive_the_round_trip():
+    """A partial read must be able to say WHICH field codes fired, and how often."""
+    report = real_report()
+    coverage = replace(report.coverage,
+                       issue_counts=(('deadline_missing', 2), ('title_missing', 1)))
+    restored = decode_report(encode_report(replace(report, coverage=coverage)))
+    assert restored.coverage.issue_counts == (('deadline_missing', 2), ('title_missing', 1))
+    assert restored.coverage == coverage
 
 
 def test_summary_exposes_counts_only():

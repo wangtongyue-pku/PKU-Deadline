@@ -74,12 +74,16 @@ def test_full_chain_from_fictional_page_to_sandbox_import(page, setup):
     assert not report.coverage.complete and 'boundary_unverified' in report.coverage.reasons
     assert report.coverage.read_count == 4
 
-    # 2. review against the sandbox's local tasks, read-only
+    # 2. review against the sandbox's local tasks, read-only. The four fictional
+    # titles differ only by a digit, so the shared similarity rule flags them as
+    # possible duplicates at PREVIEW time - the user decides, nothing merges.
     snapshot = build_review(report, repo.list_tasks(include_completed=True))
-    assert {i.category for i in snapshot.items} == {'待新增'}
+    assert {i.category for i in snapshot.items} == {'可能重复'}
+    assert all(i.batch_peers for i in snapshot.items)
 
-    # 3. human selection: import one of the four, leave the rest unchosen
-    batch = prepare_import(target, snapshot, {1: ImportDecision('new')})
+    # 3. human selection: import one of the four, leave the rest unchosen. The
+    # explicit "still a separate task" acknowledgement is what the page asks for.
+    batch = prepare_import(target, snapshot, {1: ImportDecision('new', allow_distinct=True)})
     # 4. confirmed partial import into the marked sandbox
     receipt = apply_import(target, batch, confirmed=True, partial_confirmed=True)
 
@@ -97,12 +101,12 @@ def test_full_chain_from_fictional_page_to_sandbox_import(page, setup):
     assert backups
 
 
-def test_similar_names_in_one_batch_fail_closed_without_writing(page, setup):
-    """Two similar titles need an explicit human 'keep as separate' decision.
+def test_similar_names_are_flagged_at_preview_and_need_one_acknowledgement(page, setup):
+    """Two similar titles must be visible BEFORE the batch is prepared.
 
-    The library-level guard fires inside the write transaction, so this documents
-    the behaviour the page surfaces as a late error: nothing is written, not even
-    the extension tables.
+    The preview now reuses the write-time matcher, so the user is asked to confirm
+    "still separate tasks" while nothing has been written, instead of discovering
+    the conflict as a rollback after two confirmations.
     """
     target, repo, _ = setup
     before = repo.list_tasks(include_completed=True)
@@ -110,14 +114,31 @@ def test_similar_names_in_one_batch_fail_closed_without_writing(page, setup):
     scope = ReviewReadScope(container='.fixture-scroll', max_scrolls=3)
     report = read_list_for_review(page, PROFILE, scope=scope)
     snapshot = build_review(report, repo.list_tasks(include_completed=True))
-    batch = prepare_import(target, snapshot, {1: ImportDecision('new'), 2: ImportDecision('new')})
+
+    items = {i.index: i for i in snapshot.items}
+    assert items[1].batch_peers == (2, 3) and items[2].batch_peers == (1, 3)
+    assert all(i.category == '可能重复' for i in snapshot.items)
+
+    # Without the acknowledgement the plan is refused at PREPARE time - early,
+    # before any transaction is opened.
     with pytest.raises(ValueError):
-        apply_import(target, batch, confirmed=True, partial_confirmed=True)
+        prepare_import(target, snapshot, {1: ImportDecision('new'), 2: ImportDecision('new')})
     assert repo.list_tasks(include_completed=True) == before
     with sqlite3.connect(target.path) as connection:
         tables = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert 'zhs_extension' not in tables      # the rolled-back DDL is gone too
+    assert 'zhs_extension' not in tables
+
+    # With it, both are written as two separate tasks (the transaction-level guard
+    # stays as the second layer, but it is no longer what the user runs into).
+    batch = prepare_import(target, snapshot, {
+        1: ImportDecision('new', allow_distinct=True),
+        2: ImportDecision('new', allow_distinct=True)})
+    receipt = apply_import(target, batch, confirmed=True, partial_confirmed=True)
+    assert len(receipt.task_ids) == 2
+    assert len(set(receipt.task_ids)) == 2
+    added = [t for t in repo.list_tasks(include_completed=True) if t.id in receipt.task_ids]
+    assert len({t.title for t in added}) == 2
 
 
 def test_chain_output_matches_what_the_page_shows(page, setup):

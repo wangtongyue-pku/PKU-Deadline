@@ -1,5 +1,20 @@
 # Codex / DSH 交接记录
 
+## 当前：预览阶段相似标题修复 + 1/5 字段绑定分析（2026-10-16，DSH，纯离线）
+
+- 全量 **1213 passed / 0 失败 / 0 跳过**。未连接智慧树、未调用 AI、未写任何数据库。
+- **已修（用户指定优先项）**：同批**相似**标题现在在**预览阶段**就被标为「可能重复」并要求用户确认「仍作为独立任务」，不再等到写入事务才回滚。做法是让 `build_review` 的 `batch_peers` 复用**写入时同一个**匹配器（`find_matches`，相似度 ≥.72 且同课程同类型；章次序号不同则明确不算相似），保留原有同名判定（`possible_matches`）。建议只作提示，绝不自动合并；`ImportDecision.allow_distinct` 仍是唯一的放行依据，事务层守卫保留为第二道防线。
+- **为什么只绑定 1/5（基于本次证据的推断，未猜选择器）**：
+  - 页面共 5 张 `.homework-item`（我的探针用的是纯 CSS 可见性计数），而读取器的 `visible()` 是**视口 ∩ 裁剪容器**的几何判定，因此它只把 **2** 张计入 `seen`——两个「5」和「2」是**不同的可见性定义**，不是矛盾。
+  - `read_count=1`：2 张里只有 1 张产出带标题的任务。
+  - reasons 里**没有** `invalid_or_ambiguous_fields`，说明**没有**任何 `ambiguous_*` / `overlapping_task_fields` / `deadline_outside_verified_container` / `invalid_task_field`（这些都会在该分支中止整批）。允许逐卡的只有 `title_missing` / `deadline_missing` / `deadline_time_missing`；结合 `len(tasks)=1`，另一张最可能是**名称未绑定**（`title_missing` 会被 `if collected[p].title` 过滤）。
+  - `scrolls=1` 而 `seen` 没有增加 → 那一次移动没有带来新位置；`container` 用的是策略默认（文档滚动器），**列表很可能在内层容器里滚动**。
+  - `displayed_total_unknown` 属预期：validation profile 未声明总数选择器。
+- **下一次真实读取要收集的证据（已备好，不需要新代码）**：`scripts/zhihuishu_real_read.py` 在读取前写 `census.json`（`CENSUS`）：每张卡片的 `title_matches` / `deadline_matches` / `card_course_matches`（0=未绑定，>1=多义）、`title_shape` / `deadline_shape`（标签名、**类数量**、层级深度，**不含文字**）、`title_wrapper_nodes` / `tit_class_nodes` / `item_time_nodes`，以及 `cards_on_screen` vs `cards`、`document_scrollable`、`inner_scroller_count` / `inner_scroller_labels`（判定**哪个元素在滚动**，据授权范围设置 `ReviewReadScope(container=…)`）。报告侧新增 `ScrollCoverage.issue_counts`（代码→次数），经白名单载荷进入预览页的「读取范围与限制」，让「字段不完整」能说出**是哪一个字段**。
+- **本轮不做**：不猜选择器、不点任务、不进试卷 / 考试 / 视频、不扩大到考试与视频语义、不开放正式写入、不调用 AI、不启动定时。
+- **新增留存（仅本机、已忽略目录）**：`census.json` 只有计数 / 布尔 / 元素形状与脱敏地址形态；载荷新增 `issue_counts`（代码与次数）。二者都不含任务文字、平台 ID 或链接。
+- **待用户确认后清理**：`.local-tmp/zhs-validation/`（含本次真实读取的载荷、监听日志、探针、普查、触发文件）与 8510 验收实例仍在，等用户确认检查完毕再精确清理；**不碰**其他沙箱库、项目文件与历史备份。
+
 ## 当前：智慧树首次受限真实读取（2026-10-16，DSH，已执行）
 
 - 用户授权一次真实只读验证（临时浏览器、本人登录、自选课程、≤5 条、≤1 次定位性滚动、只取标题 / 课程 / 截止 / 状态、不进试卷考试学习内容、不写正式库或沙箱、不保存登录状态、不调用 AI），并在过程中**单独同意了一处边界规范化**。全量 **1208 passed / 0 失败 / 0 跳过**。

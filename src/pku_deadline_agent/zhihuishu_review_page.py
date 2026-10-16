@@ -30,7 +30,20 @@ REASONS = {'boundary_unverified': '列表边界尚未验证', 'displayed_total_u
            'end_not_settled': '列表末端未确认稳定', 'course_not_bound': '课程上下文未绑定',
            'empty_not_proven': '空列表未经证实', 'end_marker_not_visible': '已核验的末端标记不可见',
            'unread_positions': '存在未读取的位置', 'time_limit': '达到读取时间上限',
-           'observation_limit': '达到观察次数上限', 'unstable_list': '列表在读取期间不稳定'}
+           'observation_limit': '达到观察次数上限', 'unstable_list': '列表在读取期间不稳定',
+           # Reader-level codes, so a partial read can say WHICH field failed.
+           'title_missing': '任务名称未能绑定', 'course_binding_missing': '课程上下文未绑定',
+           'course_binding_conflict': '卡片课程与上下文不一致', 'deadline_missing': '截止时间未能绑定',
+           'deadline_time_missing': '只有日期、缺少时刻',
+           'ambiguous_title': '名称字段有多义匹配', 'ambiguous_deadline': '截止字段有多义匹配',
+           'overlapping_task_fields': '字段节点重叠', 'invalid_task_field': '字段内容被拒绝',
+           'deadline_outside_verified_container': '截止时间在已核验容器之外',
+           'unsafe_source_link': '来源链接不安全', 'duplicate_observed_id': '同屏出现重复标识',
+           'visible_task_limit': '可见任务超过上限', 'nested_task_cards': '卡片嵌套',
+           'loaded_node_limit': '加载节点超过上限', 'unsafe_field': '字段含不安全元素',
+           'total_format_changed': '总数格式变化', 'total_count_conflict': '总数与读出冲突',
+           'empty_state_conflict': '空态与内容冲突', 'invalid_scan_position': '位置标记无效',
+           'ambiguous_scan_positions': '位置标记重复', 'loaded_outside_view': '存在屏外已加载卡片'}
 
 
 def invalidate_review(*, keep_receipt=False):
@@ -125,6 +138,10 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         st.write('范围完整：', coverage.inventory_complete, '字段完整：', coverage.fields_complete)
         for reason in coverage.reasons:
             st.text(REASONS.get(reason, reason))
+        if coverage.issue_counts:
+            # Code and count only: this is how a partial read explains itself.
+            st.text('逐字段判定：' + '、'.join(
+                f'{REASONS.get(code, code)} ×{count}' for code, count in coverage.issue_counts))
         st.caption('无稳定来源 ID；临时编号只区分本次候选。同名任务不自动合并。')
     for col, category in zip(st.columns(4), CATEGORIES):
         col.metric(category, sum(i.category == category for i in snapshot.items))

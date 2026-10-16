@@ -34,6 +34,41 @@ def test_fuzzy_existing_match_reuses_common_matcher(snapshot):
     assert result.items[0].matches[0].kind == 'possible'
 
 
+def batch_of(*titles):
+    """A fictional batch with the given titles, one course, complete fields."""
+    from datetime import datetime
+
+    from pku_deadline_agent.time_utils import BEIJING
+    from pku_deadline_agent.zhihuishu_reader import ReadTask
+    from pku_deadline_agent.zhihuishu_scroll import ScrollCoverage, ScrollReport
+
+    tasks = tuple(ReadTask(title, '虚构翻转课甲',
+                           datetime(2034, 6, 10, 20, tzinfo=BEIJING), '2034-06-10')
+                  for title in titles)
+    coverage = ScrollCoverage(None, len(tasks), len(tasks), len(tasks), len(tasks), 1,
+                              True, False, True, False, 'unverified', 0, ('boundary_unverified',))
+    return build_review(ScrollReport(tasks, coverage, '虚构翻转课甲', 'synthetic'), ())
+
+
+def test_similar_titles_in_one_batch_are_flagged_before_any_write():
+    """The preview reuses the write-time matcher, so the user is asked early."""
+    snapshot = batch_of('虚构滚动任务1', '虚构滚动任务2')
+    assert [i.batch_peers for i in snapshot.items] == [(2,), (1,)]
+    assert all(i.category == '可能重复' for i in snapshot.items)
+
+
+def test_different_chapter_ordinals_are_not_called_similar():
+    """第1章 / 第2章 are clearly different tasks: no false duplicate warning."""
+    snapshot = batch_of('虚构第1章作业', '虚构第2章作业')
+    assert [i.batch_peers for i in snapshot.items] == [(), ()]
+    assert all(i.category == '待新增' for i in snapshot.items)
+
+
+def test_unrelated_titles_are_not_flagged():
+    snapshot = batch_of('虚构阅读练习', '虚构数据实验报告')
+    assert [i.batch_peers for i in snapshot.items] == [(), ()]
+
+
 def test_incoming_or_missing_task_does_not_infer_local_completion(snapshot):
     untouched = replace(snapshot.local_tasks[0], id=99, title='虚构未出现作业')
     result = build_review(snapshot.report, snapshot.local_tasks+(untouched,))

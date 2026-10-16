@@ -77,6 +77,59 @@ PROBE = """() => {
 }"""
 RENDER_WAIT_SECONDS = 45
 
+# Per-card field-binding census. Counts, booleans and element SHAPE only - never a
+# title, course or date. This is what answers "which selector failed on which
+# card" for a partial read, so the next profile revision is evidence-based.
+CENSUS = r"""(p) => {
+  const cards=[...document.querySelectorAll('.homework-item')];
+  const onScreen = e => {
+    if(!e || !e.isConnected) return false;
+    let r=e.getBoundingClientRect();
+    let left=Math.max(0,r.left), right=Math.min(innerWidth,r.right);
+    let top=Math.max(0,r.top), bottom=Math.min(innerHeight,r.bottom);
+    for(let n=e;n;n=n.parentElement) {
+      const s=getComputedStyle(n);
+      if(s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||
+         n.getAttribute('aria-hidden')==='true'||Number(s.opacity)===0) return false;
+      if(n!==e && /(auto|scroll|hidden|clip)/.test(s.overflow+s.overflowX+s.overflowY)) {
+        const b=n.getBoundingClientRect();
+        left=Math.max(left,b.left);right=Math.min(right,b.right);
+        top=Math.max(top,b.top);bottom=Math.min(bottom,b.bottom);
+      }
+    }
+    return right>left && bottom>top;
+  };
+  const count = (card,sel) => { try { return sel
+      ? [...card.querySelectorAll(sel)].filter(n=>n.closest('.homework-item')===card).length
+      : -1; } catch(_) { return -2; } };
+  const shape = e => e ? {tag:e.tagName.toLowerCase(), classes:e.classList.length,
+      depth:(()=>{let d=0;for(let n=e;n;n=n.parentElement)d++;return d;})()} : null;
+  const scrollers=[...document.querySelectorAll('*')].filter(e=>{
+      const s=getComputedStyle(e);
+      return /(auto|scroll)/.test(s.overflow+s.overflowY) && e.scrollHeight>e.clientHeight+2;});
+  const label = e => (e && typeof e.className==='string' && e.className)
+      ? e.className.trim().split(/\s+/).slice(0,3).join('.') : '';
+  return {
+    cards: cards.length,
+    cards_on_screen: cards.filter(onScreen).length,
+    document_scrollable: document.documentElement.scrollHeight > innerHeight + 2,
+    inner_scroller_count: scrollers.length,
+    inner_scroller_labels: scrollers.slice(0,3).map(label),
+    per_card: cards.map((card,i)=>({
+      index: i+1,
+      on_screen: onScreen(card),
+      title_matches: count(card,p.title),
+      deadline_matches: count(card,p.deadline),
+      card_course_matches: count(card,p.card_course),
+      title_shape: shape(p.title?card.querySelector(p.title):null),
+      deadline_shape: shape(p.deadline?card.querySelector(p.deadline):null),
+      title_wrapper_nodes: card.querySelectorAll('.title-wrapper').length,
+      tit_class_nodes: card.querySelectorAll('.tit').length,
+      item_time_nodes: card.querySelectorAll('.homework-item-time').length,
+    })),
+  };
+}"""
+
 
 def status(text: str) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
@@ -178,6 +231,19 @@ def wait_for_render(context, seconds=RENDER_WAIT_SECONDS):
     return nodes
 
 
+def census(context, profile) -> dict:
+    """Structural field-binding census of the best candidate (no text at all)."""
+    params = {'title': profile.title, 'deadline': profile.deadline,
+              'card_course': profile.card_course}
+    for kind, target in targets(context):
+        try:
+            return {'kind': kind, 'url': url_shape(target.url),
+                    'nodes': target.evaluate(CENSUS, params)}
+        except Exception:                        # noqa: BLE001 - try the next one
+            continue
+    return {'error': 'census-unavailable'}
+
+
 def readers(reload=False):
     """Resolve the read path from the (optionally reloaded) modules."""
     import pku_deadline_agent.zhihuishu_reader as reader
@@ -196,7 +262,8 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     if not KEEP_PROFILE:
         shutil.rmtree(PROFILE, ignore_errors=True)
-    for stale in TRIGGERS + ('report.json', 'summary.json', 'watch.log', 'probe.json'):
+    for stale in TRIGGERS + ('report.json', 'summary.json', 'watch.log', 'probe.json',
+                             'census.json', 'url-shapes.json'):
         (OUT / stale).unlink(missing_ok=True)
     print(f'[zhihuishu-real-read] profile={"kept" if KEEP_PROFILE else "fresh"}', flush=True)
 
@@ -239,6 +306,9 @@ def main() -> int:
                       f'{json.dumps(nodes, ensure_ascii=False)}', flush=True)
                 (OUT / 'probe.json').write_text(
                     json.dumps(probe(context), ensure_ascii=False, indent=2), encoding='utf-8')
+                (OUT / 'census.json').write_text(
+                    json.dumps(census(context, profile), ensure_ascii=False, indent=2),
+                    encoding='utf-8')
 
                 shapes, failure = [], '没有可读取的页面或 iframe'
                 status(f'attempt-{attempt}: reading')
