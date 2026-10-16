@@ -10,7 +10,15 @@ from pku_deadline_agent.config import database_path
 from pku_deadline_agent.database import ReadOnlyTaskRepository
 from pku_deadline_agent.task_management import ImportDecision, identity
 from pku_deadline_agent.time_utils import format_deadline
-from pku_deadline_agent.zhihuishu_review import CATEGORIES, UNKNOWN_DEADLINE, build_review, fingerprint, simulate_choices
+from pku_deadline_agent.zhihuishu_review import (
+    CATEGORIES,
+    UNKNOWN_DEADLINE,
+    build_review,
+    fingerprint,
+    is_fictional,
+    origin_label,
+    simulate_choices,
+)
 from pku_deadline_agent.zhihuishu_samples import sample_review_data
 from pku_deadline_agent.zhihuishu_import import prepare_import, apply_import, source_associations
 
@@ -18,7 +26,11 @@ PREFIX = 'zhs_review_'
 ACTIONS = {'暂不处理': 'skip', '拟新增独立任务': 'new', '拟关联已有任务': 'link', '拟修改已有截止': 'update'}
 REASONS = {'boundary_unverified': '列表边界尚未验证', 'displayed_total_unknown': '页面总数未知',
            'fields_incomplete': '部分任务字段缺失', 'task_limit': '达到累计任务上限',
-           'scroll_limit': '达到滚动上限', 'pagination_not_traversed': '分页尚未读取'}
+           'scroll_limit': '达到滚动上限', 'pagination_not_traversed': '分页尚未读取',
+           'end_not_settled': '列表末端未确认稳定', 'course_not_bound': '课程上下文未绑定',
+           'empty_not_proven': '空列表未经证实', 'end_marker_not_visible': '已核验的末端标记不可见',
+           'unread_positions': '存在未读取的位置', 'time_limit': '达到读取时间上限',
+           'observation_limit': '达到观察次数上限', 'unstable_list': '列表在读取期间不稳定'}
 
 
 def invalidate_review(*, keep_receipt=False):
@@ -31,15 +43,25 @@ def invalidate_review(*, keep_receipt=False):
 
 def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None):
     st.subheader('智慧树任务预览')
-    st.info('开发预览：智慧树列表使用虚构数据。所有选择和确认仅模拟，不保存任务，不连接智慧树或 AI。'
-            if import_target is None else
-            '列表与专用库均为虚构数据。默认预览不写库；另选“模拟数据库入库”并确认后才写入虚构库。正式写入未开放，不连接智慧树或 AI。')
     sample, example_tasks = sample_review_data()
     report = report if report is not None else sample
-    if not report.evidence.startswith('synthetic'):
+    try:
+        origin = origin_label(report)
+        fictional = is_fictional(report)
+    except (ValueError, AttributeError):
         invalidate_review()
-        st.error('本轮界面只接受虚构列表，不接收真实浏览器数据。')
+        st.error('读取结果缺少可辨认的来源标记，拒绝进入预览；请重新通过有界读取器获取。')
         return
+    if fictional:
+        st.info('开发预览：智慧树列表使用虚构数据。所有选择和确认仅模拟，不保存任务，不连接智慧树或 AI。'
+                if import_target is None else
+                '列表与专用库均为虚构数据。默认预览不写库；另选“模拟数据库入库”并确认后才写入虚构库。正式写入未开放，不连接智慧树或 AI。')
+    else:
+        # A real authorized read: preview and simulated matching only. Nothing is
+        # written anywhere, and no further site access happens on this page.
+        st.info(f'数据来源：{origin}，来自一次获你单独授权的有界读取。'
+                '此处只做本地预览与模拟匹配：不再访问智慧树，不调用 AI，'
+                '在生产写入获得明确授权前不写入任何数据库（包括专用模拟库）。')
     write_mode = False
     associations_available = ()
     if import_target is not None:
@@ -52,10 +74,16 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
             invalidate_review()
             st.error('无法验证专用模拟库，入库入口关闭。')
             return
-        mode = st.radio('运行方式', ('模拟预览（不写库）', '模拟数据库入库'), key='zhs_mode', horizontal=True)
-        write_mode = mode == '模拟数据库入库'
-        if write_mode:
-            st.warning('本入口会实际写入专用模拟数据库；虚构数据不会写入正式库。')
+        if not fictional:
+            # Real-read data never reaches any database until production writes
+            # are explicitly authorized; the sandbox stays fictional-only too.
+            st.warning('受限真实读取的结果在获得生产写入授权前不能写入任何数据库'
+                       '（包括专用模拟库）；下面只有预览与模拟确认。')
+        else:
+            mode = st.radio('运行方式', ('模拟预览（不写库）', '模拟数据库入库'), key='zhs_mode', horizontal=True)
+            write_mode = mode == '模拟数据库入库'
+            if write_mode:
+                st.warning('本入口会实际写入专用模拟数据库；虚构数据不会写入正式库。')
     reference = st.radio('对比对象', ('本地任务（只读）', '虚构待办（体验匹配）'), key='zhs_reference', horizontal=True)
     try:
         tasks = (ReadOnlyTaskRepository(path if path is not None else database_path()).list_tasks(include_completed=True)
@@ -83,9 +111,12 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
     st.caption('本地任务包含已完成项，排除回收站；平台状态不会改动本地完成状态。当前对比只使用任务字段，不读取通知正文。')
     coverage = report.coverage
     if coverage.complete:
-        st.success('该虚构列表的范围和字段已验证完整；仍然只供模拟。')
+        st.success(f'{origin}：范围和字段已验证完整；仍然只供预览与模拟，不写任何数据库。')
     else:
-        st.warning('列表读取不完整。未出现的任务仍保持原样，不能推断已完成、已删除或已取消。')
+        # The explicit marker the user asked for: a partial read is a first-class
+        # state, never silently presented as a full list.
+        st.warning(f'**部分读取**（{origin}）：列表读取不完整。已读出的任务仅供预览；'
+                   '未出现的任务仍保持原样，不能推断已完成、已删除或已取消。')
     st.write(f'页面总数：{coverage.displayed_total if coverage.displayed_total is not None else "未知"} · '
              f'已加载峰值 / 最后：{coverage.loaded_peak} / {coverage.loaded_final} · '
              f'累计触及 / 读出：{coverage.observed_count} / {coverage.read_count} · '
@@ -99,7 +130,8 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         col.metric(category, sum(i.category == category for i in snapshot.items))
     st.dataframe([{'编号': i.index, '分类': i.category, '课程': i.task.course or '待确认',
                    '任务标题': i.task.title or '缺失', '截止时间（北京时间）': format_deadline(i.task.deadline),
-                   '平台状态': i.task.status or '未知', '来源': '智慧树（虚构列表）'}
+                   '平台状态': i.task.status or '未知',
+                   '来源': '智慧树（虚构列表）' if fictional else '智慧树（受限真实读取）'}
                   for i in snapshot.items], hide_index=True, use_container_width=True)
 
     left, right = st.columns(2)
@@ -220,7 +252,8 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                 st.rerun()
     else:
         st.button('确认入库（正式写入未开放）',disabled=True,key=PREFIX+'production_closed')
-        st.caption('正式库写入默认关闭。只有独立验收实例可选择“模拟数据库入库”；预览确认不会转换成真实保存。')
+        st.caption('正式库写入默认关闭。虚构列表只在独立验收实例可选“模拟数据库入库”；'
+                   '受限真实读取的结果在获得明确生产授权前不能写入任何数据库。预览确认不会转换成真实保存。')
     last = st.session_state.get('zhs_import_result')
     if import_target and last and last[0]==import_target.database_id:
         _, before, after, receipt = last

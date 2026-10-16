@@ -14,6 +14,31 @@ from pku_deadline_agent.zhihuishu_scroll import ScrollReport
 CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
 UNKNOWN_DEADLINE = '截止日期或时刻缺失，不自动补造'
 
+# Where a preview's data came from. The reader stamps every report with one of
+# these; the page labels the origin honestly, and the sandbox import path only
+# ever accepts fictional material (see is_fictional).
+ORIGIN_LABELS = {
+    'synthetic': '虚构列表（样例或离线页面读取）',
+    'synthetic-validation': '虚构页面读取（验证模式）',
+    'synthetic-review': '虚构列表（开发样例）',
+    'authorized-real-validation': '受限真实读取（验证模式）',
+    'authorized-real-profile': '真实读取（已核验完整配置）',
+}
+
+
+def origin_label(report: ScrollReport) -> str:
+    """Human-readable provenance for a report; unknown markers are refused."""
+    label = ORIGIN_LABELS.get(getattr(report, 'evidence', None))
+    if label is None:
+        raise ValueError('读取结果缺少可辨认的来源标记，拒绝进入预览；请重新通过有界读取器获取。')
+    return label
+
+
+def is_fictional(report: ScrollReport) -> bool:
+    """True for sample or fictional-page reads — the only material the sandbox
+    import path may ever write. Real-read evidence previews but never writes."""
+    return report.evidence.startswith('synthetic')
+
 
 def fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
