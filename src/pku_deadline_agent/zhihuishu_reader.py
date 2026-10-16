@@ -32,9 +32,16 @@ class ReaderError(SessionLayoutChanged):
 
 
 class ReaderLimitExceeded(ReaderError):
-    def __init__(self, loaded: int, visible: int):
+    def __init__(self, loaded: int, visible: int, observed_positions: tuple[int, ...] = ()):
         self.loaded, self.visible = loaded, visible
+        self.observed_positions = observed_positions
         super().__init__(f'当前加载 {loaded} 个卡片、可见 {visible} 个；超过本次上限，未读取任务字段。')
+
+
+class ReaderUnstable(ReaderError):
+    def __init__(self, observed_positions: tuple[int, ...] = ()):
+        self.observed_positions = observed_positions
+        super().__init__('两次有界观察不一致，页面仍在变化；请等待加载完成。')
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,8 @@ class ListProfile:
     task_id_attribute: str | None = None
     course_id_attribute: str | None = None
     enrollment_id_attribute: str | None = None
+    scan_position_attribute: str | None = None  # Temporary viewport traversal, never source ID.
+    scan_position_base: int = 1
     real_verified: bool = False
 
     def __post_init__(self):
@@ -68,11 +77,17 @@ class ListProfile:
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError('必须显式提供字段与课程范围选择器；不猜实际页面结构。')
         for name, value in asdict(self).items():
+            if name == 'scan_position_attribute':
+                if value not in (None, 'aria-posinset', 'aria-rowindex', 'data-index'):
+                    raise ValueError('滚动位置只允许已核验的列表序号属性。')
+                continue
             if name.endswith('_attribute') and value is not None:
                 if not re.fullmatch(r'data-(?!v-|.*(?:token|cookie|auth|user|account|password|key|secret|session|credential|email|student))[a-z-]{1,40}', value):
                     raise ValueError('仅允许已核验的非认证 data 标识属性；不读取任意属性。')
         if type(self.real_verified) is not bool:
             raise ValueError('配置核验标记必须是布尔值。')
+        if type(self.scan_position_base) is not int or self.scan_position_base not in (0, 1):
+            raise ValueError('列表序号基准只支持 0 或 1。')
 
 
 @dataclass(frozen=True)
@@ -90,6 +105,7 @@ class ReadTask:
     kind: str = 'homework'
     opens_at: datetime | None = None  # Never filled from a deadline or exam page.
     identity_verified: bool = False  # One snapshot cannot prove ID stability.
+    scan_position: int | None = None  # Session-local position, not a persistent identity.
 
 
 @dataclass(frozen=True)
@@ -121,6 +137,9 @@ class ReadReport:
     coverage: Coverage
     issues: tuple[ReadIssue, ...]
     verification: str  # synthetic[-validation] / authorized-real-{profile,validation}
+    fragments: tuple[ReadTask, ...] = field(default=(), repr=False)
+    observed_positions: tuple[int, ...] = ()
+    course_context: str | None = field(default=None, repr=False)
 
     @property
     def fields_valid(self) -> bool:
@@ -188,10 +207,12 @@ def _identifier(value: str | None) -> str | None:
     return value
 
 
-def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
+def _normalize(snapshot: dict, *, base: str, verification: str,
+               capture_fragments: bool = False) -> ReadReport:
     counts = snapshot['counts']
     issues: list[ReadIssue] = []
     tasks: list[ReadTask] = []
+    fragments: list[ReadTask] = []
     course = _text(snapshot['course'], 100)
     if not course:
         issues.append(ReadIssue('course_binding_missing'))
@@ -206,7 +227,8 @@ def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
             title = _text(raw['title'], 200)
             if not title:
                 issues.append(ReadIssue('title_missing', position))
-                continue
+                if not capture_fragments:
+                    continue
             card_course = _text(raw['course'], 100)
             if card_course and card_course != course:
                 issues.append(ReadIssue('course_binding_conflict', position))
@@ -224,7 +246,12 @@ def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
                 link = _source_link(raw['source_url'], base)
             except SourceRejected:
                 issues.append(ReadIssue('unsafe_source_link', position))
-            tasks.append(ReadTask(title, course, due, date_only, link, observed_id, *scope_ids))
+            task = ReadTask(title or '', course, due, date_only, link, observed_id, *scope_ids,
+                            scan_position=raw.get('scan_position'))
+            if capture_fragments:
+                fragments.append(task)
+            if title:
+                tasks.append(task)
         except SourceRejected:
             issues.append(ReadIssue('invalid_task_field', position))
     total_text = counts['total_text']
@@ -262,7 +289,8 @@ def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
                         counts['has_next'], counts['loading'], counts['lazy'], counts['virtual'],
                         max(0, max(counts['loaded'], total or 0) - len(tasks)),
                         tuple(scope), not scope and not issues)
-    return ReadReport(tuple(tasks), coverage, tuple(issues), verification)
+    return ReadReport(tuple(tasks), coverage, tuple(issues), verification, tuple(fragments),
+                      tuple(snapshot.get('observed_positions', ())), course)
 
 
 class BoundedTaskListReader:
@@ -278,8 +306,8 @@ class BoundedTaskListReader:
             raise ValueError('可见任务上限必须为 1–20。')
         self.profile, self.limit = profile, limit
 
-    def read(self, page: ReadablePage, *, allow_real: bool = False,
-             validation_only: bool = False) -> ReadReport:
+    def check_access(self, page: ReadablePage, *, allow_real: bool = False,
+                     validation_only: bool = False) -> tuple[str, str, str]:
         """Explicit validation mode permits an incomplete, observed profile.
 
         This is only for a separately authorized inspection, NOT a production
@@ -309,8 +337,20 @@ class BoundedTaskListReader:
                 raise PermissionError('字段 / 课程 / 完整性配置仅经模拟验证，不能用于真实页面。')
             verification = 'authorized-real-validation' if validation_only else 'authorized-real-profile'
             base = url
-        params = asdict(self.profile) | {'limit': self.limit}
+        return url, verification, base
+
+    def read(self, page: ReadablePage, *, allow_real: bool = False,
+             validation_only: bool = False, capture_fragments: bool = False,
+             seen_positions: tuple[int, ...] = ()) -> ReadReport:
+        url, verification, base = self.check_access(page, allow_real=allow_real,
+                                                     validation_only=validation_only)
+        if type(capture_fragments) is not bool or len(seen_positions) > self.limit or any(
+                type(x) is not int or x < 1 for x in seen_positions):
+            raise ValueError('滚动片段 / 累计范围参数无效。')
+        params = asdict(self.profile) | {'limit': self.limit, 'capture_fragments': capture_fragments,
+                                        'seen_positions': seen_positions}
         observations = []
+        touched = set(seen_positions)
         for _ in range(2):
             if page.url != url:
                 raise ReaderError('读取期间页面跳转，已停止。')
@@ -321,18 +361,24 @@ class BoundedTaskListReader:
             if not isinstance(snapshot, dict):
                 raise ReaderError('DOM 返回结构无效。')
             code = snapshot.get('error')
-            if code == 'visible_task_limit':
+            if code in ('visible_task_limit', 'cumulative_task_limit'):
                 c = snapshot['counts']
-                raise ReaderLimitExceeded(c['loaded'], c['visible'])
+                raise ReaderLimitExceeded(c['loaded'], c['visible'], tuple(sorted(touched)))
             if code == 'authentication_required':
                 raise SessionAuthRequired('需要用户本人重新登录；没有任务读取结果。')
             if code:
                 raise ReaderError('列表结构 / 选中视图或字段发生变化，已停止。')
             observations.append(snapshot)
-        if page.url != url or observations[0] != observations[1]:
-            raise ReaderError('两次有界观察不一致，页面仍在变化；请等待加载完成。')
+            if capture_fragments:
+                touched.update(snapshot.get('observed_positions', ()))
+                params['seen_positions'] = tuple(sorted(touched))
+        if page.url != url:
+            raise ReaderError('读取期间页面跳转，已停止。')
+        if observations[0] != observations[1]:
+            raise ReaderUnstable(tuple(sorted(touched)))
         try:
-            return _normalize(observations[0], base=base, verification=verification)
+            return _normalize(observations[0], base=base, verification=verification,
+                              capture_fragments=capture_fragments)
         except (KeyError, TypeError, ValueError, SourceRejected):
             raise ReaderError('读取结果校验失败；未当成没有任务。') from None
 

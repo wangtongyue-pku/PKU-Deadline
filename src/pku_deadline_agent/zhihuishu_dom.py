@@ -55,13 +55,17 @@ SNAPSHOT_SCRIPT = r"""p => {
    if(document.querySelector('input[type=password]')) return fail('authentication_required');
    if(shown(document,'video,audio').length) return fail('unsafe_media_view');
    // Only fixed UI labels are tested, no document/body text dump.
-   const tabs=shown(document,'.ant-tabs-tab[aria-selected="true"]');
-   if(tabs.length!==1||boundedText(tabs[0],20)!=='作业') return fail('wrong_task_tab');
-   const panes=shown(document,'.ant-tabs-tabpane-active');
+   // During bounded scrolling only fixed UI labels may be retained offscreen.
+   // Task/course text below still uses viewport visibility.
+   const controls=(root,s)=>p.capture_fragments?nodes(root,s).filter(rendered):shown(root,s);
+   const controlText=e=>p.capture_fragments?(e.innerText.length<=20?e.innerText.trim():''):boundedText(e,20);
+   const tabs=controls(document,'.ant-tabs-tab[aria-selected="true"]');
+   if(tabs.length!==1||controlText(tabs[0])!=='作业') return fail('wrong_task_tab');
+   const panes=controls(document,'.ant-tabs-tabpane-active');
    if(panes.length!==1) return fail('active_pane_changed');
    const pane=panes[0];
-   const states=shown(pane,'.state-tabs .menu-pane.active');
-   if(states.length!==1||boundedText(states[0],20)!=='未完成') return fail('wrong_status_filter');
+   const states=controls(pane,'.state-tabs .menu-pane.active');
+   if(states.length!==1||controlText(states[0])!=='未完成') return fail('wrong_status_filter');
    // A legitimate empty list can have zero height. Count offscreen card nodes,
    // but never read their fields; CSS-hidden alternate lists remain excluded.
    const lists=nodes(pane,'.homework-content').filter(rendered);
@@ -91,6 +95,17 @@ SNAPSHOT_SCRIPT = r"""p => {
    const counts={loaded:all.length,visible:onscreen.length,
      outside_view:all.length-onscreen.length,total_text:totalText,has_next:hasNext,...flags};
    if(onscreen.length>p.limit) return {error:'visible_task_limit',counts};
+   const positions=onscreen.map(card=>{
+     if(!p.scan_position_attribute)return all.indexOf(card)+1;
+     const value=attribute(card,p.scan_position_attribute);
+     if(!value||!/^\d{1,6}$/.test(value))throw Error('invalid_scan_position');
+     const position=Number(value)+1-p.scan_position_base;
+     if(position<1)throw Error('invalid_scan_position');
+     return position;
+   });
+   if(new Set(positions).size!==positions.length)return fail('ambiguous_scan_positions');
+   if(p.capture_fragments && new Set([...(p.seen_positions||[]),...positions]).size>p.limit)
+     return {error:'cumulative_task_limit',counts};
    const empty=shown(list,p.empty).length===1;
    const courseId=attribute(scope,p.course_id_attribute);
    const enrollmentId=attribute(scope,p.enrollment_id_attribute);
@@ -112,13 +127,15 @@ SNAPSHOT_SCRIPT = r"""p => {
        error='deadline_outside_verified_container';
      if(error) {tasks.push({position,error});continue;}
      try {
-       tasks.push({position,title:fields.title?boundedText(fields.title,200):null,
+       tasks.push({position,scan_position:p.capture_fragments?positions[position]:null,
+         title:fields.title?boundedText(fields.title,200):null,
          deadline:fields.deadline?boundedText(fields.deadline,80):null,
          course:fields.course?boundedText(fields.course,100):null,
          source_url:fields.source_url?fields.source_url.getAttribute('href'):null,
          task_id:attribute(card,p.task_id_attribute)});
      } catch(_) {tasks.push({position,error:'invalid_task_field'});}
    }
-   return {counts,empty,course,course_id:courseId,enrollment_id:enrollmentId,tasks};
+   return {counts,empty,course,course_id:courseId,enrollment_id:enrollmentId,tasks,
+      observed_positions:p.capture_fragments?positions:[]};
  } catch(_) {return fail('invalid_layout_or_field');}
 }"""

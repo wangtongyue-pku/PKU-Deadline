@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<title>虚构滚动列表：非平台页面</title>
+<style>
+body { margin:8px; font:14px sans-serif; }
+.fixture-scroll { height:300px; width:850px; overflow:auto; }
+.homework-content { position:relative; }
+.homework-item { position:relative; height:160px; box-sizing:border-box; border:1px solid #ccc; }
+.homework-item-time { position:absolute; top:120px; }
+.tit { display:block; height:24px; }
+</style>
+<div class="fixture-scope">
+ <h1 class="fixture-course">虚构滚动课程</h1>
+ <div class="ant-tabs-tab" aria-selected="true">作业</div>
+ <div class="ant-tabs-tab" aria-selected="false">考试</div>
+ <div class="ant-tabs-tabpane-active">
+  <div class="state-tabs"><span class="menu-pane active">未完成</span></div>
+  <div class="fixture-total"></div>
+  <div class="fixture-scroll"><div class="homework-content"></div></div>
+ </div>
+</div>
+<script>
+// All data and behaviors are invented. No external resources or platform IDs.
+window.sideEffects=0;
+window.setupList=function(o){
+ const box=document.querySelector('.fixture-scroll'),list=box.firstElementChild;
+ const total=document.querySelector('.fixture-total');
+ total.textContent=`共 ${o.count} 条`;
+ if(o.document){box.style.height='auto';box.style.overflow='visible';}
+ const row=(i)=>{
+   const e=document.createElement('div');e.className='homework-item';
+   e.innerHTML=`<div class=title-wrapper><span class=tit>${o.namesake?'虚构同名任务':`虚构滚动任务${i+1}`}</span><button onclick=window.sideEffects++>开始做题</button></div>
+    <div class=homework-item-time><span>截止时间：2034.06.${String(i+1).padStart(2,'0')} 20:00</span><span class=comment>0条评论</span></div>`;
+   if(o.tall){e.style.height='450px';e.querySelector('.homework-item-time').style.top='410px';}
+   if(o.missingTitle===i)e.querySelector('.tit').remove();
+   if(o.missingDeadline===i)e.querySelector('.homework-item-time').remove();
+   return e;
+ };
+ if(o.mode==='virtual'){
+   list.style.height=`${o.count*160}px`;
+   const pool=Array.from({length:3},()=>document.createElement('div'));
+   pool.forEach(e=>list.append(e));
+   const render=()=>{
+     const first=Math.min(Math.floor(box.scrollTop/160),Math.max(0,o.count-3));
+     pool.forEach((e,j)=>{const i=first+j;if(i>=o.count){e.style.display='none';return;}
+       const fresh=row(i);e.className=fresh.className;e.innerHTML=fresh.innerHTML;
+       e.dataset.index=String(i+(o.positionOffset||0));
+       e.style.cssText=`position:absolute;top:${i*160}px;height:160px;width:100%`;
+     });
+   };
+   render();box.addEventListener('scroll',render);
+ }else{
+   let loaded=0,busy=false;
+   const append=()=>{for(let n=0;n<2&&loaded<o.count;n++)list.append(row(loaded++));};
+   if(o.mode==='lazy')append();else while(loaded<o.count)append();
+   const scroll=()=>{
+     const scroller=o.document?document.scrollingElement:box;
+     if(o.changeCourse)document.querySelector('.fixture-course').textContent='另一虚构课程';
+     if(o.reorder&&list.children.length>1)list.prepend(list.lastElementChild);
+     if(o.mode==='lazy'&&!busy&&loaded<o.count&&scroller.scrollTop+scroller.clientHeight>=scroller.scrollHeight-3){
+       busy=true;list.setAttribute('aria-busy','true');
+       setTimeout(()=>{append();busy=false;list.removeAttribute('aria-busy');},70);
+     }
+   };
+   (o.document?window:box).addEventListener('scroll',scroll);
+ }
+};
+</script></html>
