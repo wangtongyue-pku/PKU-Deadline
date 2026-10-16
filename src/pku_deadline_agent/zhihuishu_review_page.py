@@ -2,17 +2,22 @@
 
 import sqlite3
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
 from pku_deadline_agent.config import database_path
 from pku_deadline_agent.database import ReadOnlyTaskRepository
+from pku_deadline_agent.sources import SourceRejected
 from pku_deadline_agent.task_management import ImportDecision, identity
-from pku_deadline_agent.time_utils import format_deadline
+from pku_deadline_agent.time_utils import BEIJING, format_deadline
+from pku_deadline_agent.zhihuishu_display import parse_display_deadline
 from pku_deadline_agent.zhihuishu_review import (
     CATEGORIES,
     UNKNOWN_DEADLINE,
+    ManualEdit,
+    apply_edits,
     build_review,
     fingerprint,
     is_fictional,
@@ -21,8 +26,13 @@ from pku_deadline_agent.zhihuishu_review import (
 )
 from pku_deadline_agent.zhihuishu_samples import sample_review_data
 from pku_deadline_agent.zhihuishu_import import prepare_import, apply_import, source_associations
+from pku_deadline_agent.zhihuishu_validation import load_latest
 
 PREFIX = 'zhs_review_'
+# Session keys that hold USER INPUT (which source to review, manual corrections).
+# They survive invalidation on purpose: dropping them would silently discard what
+# the user typed. Everything else under PREFIX is derived and must be re-confirmed.
+KEPT_INPUTS = (PREFIX + 'source', PREFIX + 'edits')
 ACTIONS = {'暂不处理': 'skip', '拟新增独立任务': 'new', '拟关联已有任务': 'link', '拟修改已有截止': 'update'}
 REASONS = {'boundary_unverified': '列表边界尚未验证', 'displayed_total_unknown': '页面总数未知',
            'fields_incomplete': '部分任务字段缺失', 'task_limit': '达到累计任务上限',
@@ -48,16 +58,57 @@ REASONS = {'boundary_unverified': '列表边界尚未验证', 'displayed_total_u
 
 def invalidate_review(*, keep_receipt=False):
     for key in list(st.session_state):
-        if key.startswith(PREFIX):
+        if key.startswith(PREFIX) and key not in KEPT_INPUTS:
             del st.session_state[key]
     if not keep_receipt:
         st.session_state.pop('zhs_import_result', None)
 
 
+def _manual_deadline(text):
+    """Parse a hand-typed deadline. Date-only stays unknown-time, never midnight.
+
+    Accepts the platform's dotted display format and plain ISO; anything else is
+    refused with a concrete example instead of guessing.
+    """
+    text = (text or '').strip()
+    if not text:
+        return None, None
+    try:
+        return parse_display_deadline(text)
+    except SourceRejected:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError('截止时间无法识别，请用 2034.06.10 20:00 或 2034-06-10 20:00；'
+                         '只填日期表示时刻待确认。') from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=BEIJING)
+    if len(text) <= 10:
+        return None, parsed.date().isoformat()
+    return parsed, None
+
+
 def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None):
     st.subheader('智慧树任务预览')
     sample, example_tasks = sample_review_data()
+    if report is None:
+        # Real reads land here by default; the fictional samples stay the fallback
+        # and the explicit alternative, so nothing silently pretends to be real.
+        latest = load_latest()
+        if latest is not None:
+            source = st.radio('数据来源', ('最近一次真实读取', '开发样例（虚构）'),
+                              key=PREFIX+'source', horizontal=True)
+            report = latest if source == '最近一次真实读取' else None
     report = report if report is not None else sample
+    edits = st.session_state.get(PREFIX+'edits') or {}
+    try:
+        effective = apply_edits(report, edits) if edits else report
+    except (ValueError, AttributeError):
+        invalidate_review()
+        st.error('手动补充的信息无效，已忽略；请重新填写。')
+        return
+    report = effective
     try:
         origin = origin_label(report)
         fictional = is_fictional(report)
@@ -156,6 +207,47 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         for item in snapshot.items: st.session_state[f'{PREFIX}pick_{item.index}'] = True
     if right.button('取消全部选择', key=PREFIX+'none'):
         for item in snapshot.items: st.session_state[f'{PREFIX}pick_{item.index}'] = False
+
+    with st.expander('手动补充 / 修改任务信息（读取不完整的任务在这里补全）', expanded=not coverage.fields_complete):
+        st.caption('留空表示“没有该信息”。补全标题与课程后该任务即可参与导入；'
+                   '只写日期时截止时间仍记为待确认，不会补成午夜。修改只存在于本机会话。')
+        with st.form(key=PREFIX+'edit_form'):
+            pending = {}
+            for item in snapshot.items:
+                columns = st.columns([1, 3, 2, 2, 1])
+                columns[0].text(f'候选 {item.index}')
+                pending[item.index] = (
+                    columns[1].text_input('任务标题', value=item.task.title, key=f'{PREFIX}edit_title_{item.index}'),
+                    columns[2].text_input('课程', value=item.task.course or '', key=f'{PREFIX}edit_course_{item.index}'),
+                    columns[3].text_input('截止（如 2034.06.10 20:00）',
+                                          value=(item.task.deadline_date
+                                                 or (format_deadline(item.task.deadline)
+                                                     if item.task.deadline else '')),
+                                          key=f'{PREFIX}edit_due_{item.index}'),
+                    columns[4].selectbox('状态', ('未完成', '已完成'),
+                                         index=1 if item.task.status == '已完成' else 0,
+                                         key=f'{PREFIX}edit_status_{item.index}'),
+                )
+            if st.form_submit_button('应用补充 / 修改'):
+                collected = {}
+                try:
+                    for index, (title, course, due_text, status) in pending.items():
+                        due, date_text = _manual_deadline(due_text)
+                        collected[index] = ManualEdit(title=title.strip(), course=course.strip(),
+                                                      deadline=due, deadline_date=date_text, status=status)
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    st.session_state[PREFIX+'edits'] = collected
+                    invalidate_review(keep_receipt=True)
+                    st.rerun()
+        if edits:
+            st.caption('已应用手动补充：' + '、'.join(f'候选 {i}' for i in sorted(edits)))
+            if st.button('清除手动补充，回到读取原值', key=PREFIX+'edit_clear'):
+                st.session_state.pop(PREFIX+'edits', None)
+                invalidate_review(keep_receipt=True)
+                st.rerun()
+
     choices, unknown_deadlines, chosen_links = {}, set(), {}
     for item in snapshot.items:
         key = f'{PREFIX}{item.index}_'

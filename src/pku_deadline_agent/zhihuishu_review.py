@@ -1,6 +1,6 @@
 """Local comparison and simulated decisions; no database writer or AI client."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime
 import hashlib
 import json
@@ -9,7 +9,7 @@ from pku_deadline_agent.extraction import ExtractedTask
 from pku_deadline_agent.models import Task
 from pku_deadline_agent.task_management import ImportDecision, MatchSuggestion, find_matches, identity
 from pku_deadline_agent.time_utils import BEIJING, normalize_datetime
-from pku_deadline_agent.zhihuishu_reader import ReadTask, possible_matches
+from pku_deadline_agent.zhihuishu_reader import ReadTask, _text, possible_matches
 from pku_deadline_agent.zhihuishu_scroll import ScrollReport
 
 CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
@@ -65,6 +65,54 @@ class ReviewSnapshot:
     items: tuple[ReviewItem, ...] = field(repr=False)
     local_tasks: tuple[Task, ...] = field(repr=False)
     digest: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ManualEdit:
+    """User corrections for one previewed item.
+
+    Only the fields the user actually changed are set; ``None`` means "leave the
+    read value alone", while an empty string means "there is no value". A
+    correction never invents a platform fact: it is local user input, validated by
+    the same rules as the reader, and the item stays partial.
+    """
+
+    title: str | None = None
+    course: str | None = None
+    deadline: datetime | None = None
+    deadline_date: str | None = None
+    status: str | None = None
+
+
+def apply_edits(report: ScrollReport, edits) -> ScrollReport:
+    """Rebuild the report with the user's manual corrections applied.
+
+    Provenance, coverage and completeness are deliberately untouched: completing a
+    field by hand makes a task importable, it does not make the READ complete.
+    """
+    if not isinstance(edits, dict):
+        raise ValueError('手动补充信息无效。')
+    tasks = []
+    for index, task in enumerate(report.tasks, 1):
+        edit = edits.get(index)
+        if edit is None:
+            tasks.append(task)
+            continue
+        if not isinstance(edit, ManualEdit):
+            raise ValueError('手动补充信息无效。')
+        title = task.title if edit.title is None else _text(edit.title, 200)
+        course = task.course if edit.course is None else (_text(edit.course, 100) or None)
+        deadline, date_text = task.deadline, task.deadline_date
+        if edit.deadline_date is not None or edit.deadline is not None:
+            deadline, date_text = edit.deadline, (_text(edit.deadline_date, 80) or None)
+        status = task.status if edit.status is None else edit.status
+        if status not in ('未完成', '已完成'):
+            raise ValueError('平台状态只能是未完成或已完成。')
+        if deadline is not None:
+            normalize_datetime(deadline)
+        tasks.append(replace(task, title=title, course=course, deadline=deadline,
+                             deadline_date=date_text, status=status))
+    return replace(report, tasks=tuple(tasks))
 
 
 def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:

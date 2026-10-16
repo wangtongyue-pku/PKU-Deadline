@@ -4,9 +4,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolate_real_credentials(monkeypatch):
+def isolate_real_credentials(monkeypatch, tmp_path):
     for name in ("PKU_DEEPSEEK_API_KEY", "PKU_MIMO_API_KEY", "PKU_REAL_API_ENABLED"):
         monkeypatch.delenv(name, raising=False)
+    # The daily real-read payload is local user data: no test may pick it up by
+    # accident. Tests that exercise it point the variable at their own copy.
+    monkeypatch.setenv("PKU_ZHIHUISHU_PAYLOAD", str(tmp_path / "no-real-payload.json"))
     try:
         from keyring.backends.Windows import WinVaultKeyring
     except ImportError:

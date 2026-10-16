@@ -141,6 +141,34 @@ def test_similar_names_are_flagged_at_preview_and_need_one_acknowledgement(page,
     assert len({t.title for t in added}) == 2
 
 
+def test_manual_completion_of_an_unbound_card_then_import(page, setup):
+    """MVP chain: a card the reader could not bind is completed by hand and imported."""
+    from pku_deadline_agent.zhihuishu_review import ManualEdit, apply_edits
+
+    target, repo, _ = setup
+    before = repo.list_tasks(include_completed=True)
+    prepare(page, count=3)
+    page.eval_on_selector_all('.homework-item .tit', 'es=>es[1].remove()')
+    scope = ReviewReadScope(container='.fixture-scroll', max_scrolls=3)
+    report = read_list_for_review(page, PROFILE, scope=scope)
+
+    raw = build_review(report, repo.list_tasks(include_completed=True))
+    gaps = [i for i in raw.items if i.category == '信息不足']
+    assert gaps and gaps[0].task.title == ''          # surfaced, not dropped
+    assert dict(report.coverage.issue_counts).get('title_missing') == 1
+
+    edited = apply_edits(report, {gaps[0].index: ManualEdit(title='虚构手动补全作业')})
+    snapshot = build_review(edited, repo.list_tasks(include_completed=True))
+    item = next(i for i in snapshot.items if i.index == gaps[0].index)
+    assert item.category == '待新增' and not item.warnings
+
+    batch = prepare_import(target, snapshot, {item.index: ImportDecision('new')})
+    receipt = apply_import(target, batch, confirmed=True, partial_confirmed=True)
+    written = repo.get_task(receipt.task_ids[0])
+    assert written.title == '虚构手动补全作业' and written.source == 'zhihuishu'
+    assert len(repo.list_tasks(include_completed=True)) == len(before) + 1
+
+
 def test_chain_output_matches_what_the_page_shows(page, setup):
     """The preview page renders the reader's own report with the partial marker."""
     target, repo, _ = setup

@@ -137,6 +137,43 @@ def test_missing_database_reports_failure_and_creates_nothing(tmp_path,monkeypat
     assert not path.exists()
 
 
+def test_latest_real_read_can_be_reviewed_in_the_app_page(tmp_path, monkeypatch):
+    """Requirement: the real read shows up in the ordinary app, not a side tool."""
+    import json
+
+    from test_zhihuishu_validation import real_report
+    from pku_deadline_agent.zhihuishu_validation import encode_report
+
+    payload = tmp_path / 'payload.json'
+    payload.write_text(json.dumps(encode_report(real_report()), ensure_ascii=False),
+                       encoding='utf-8')
+    monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
+    formal = tmp_path / 'formal.sqlite3'
+    writer = TaskRepository(formal)
+    writer.initialize()
+    writer.add_task('虚构本地待办', '虚构受限课程', '作业')
+    before = formal.read_bytes()
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    app = AppTest.from_file(APP, default_timeout=15)
+    app.session_state['page'] = '智慧树任务预览'
+    app.run()
+    assert not app.exception, [e.value for e in app.exception]
+    assert app.radio(key='zhs_review_source').value == '最近一次真实读取'
+    assert any('受限真实读取' in i.value for i in app.info)
+    assert any('部分读取' in w.value for w in app.warning)
+    assert all(r.key != 'zhs_mode' for r in app.radio)          # no sandbox write mode
+    assert app.button(key='zhs_review_production_closed').disabled
+    picks = [c for c in app.checkbox if c.key and c.key.startswith('zhs_review_pick_')]
+    assert len(picks) == 2                                       # the real read's tasks
+    assert any('智慧树（受限真实读取）' in str(df.value.get('来源', [])) for df in app.dataframe)
+    assert formal.read_bytes() == before                         # nothing was written
+
+    # Switching to the samples is always available and never writes either.
+    app.radio(key='zhs_review_source').set_value('开发样例（虚构）').run()
+    assert len([c for c in app.checkbox if c.key and c.key.startswith('zhs_review_pick_')]) == 7
+    assert formal.read_bytes() == before
+
+
 def test_entering_preview_invalidates_other_page_approvals(setup):
     from types import SimpleNamespace
     app = AppTest.from_file(APP,default_timeout=15)

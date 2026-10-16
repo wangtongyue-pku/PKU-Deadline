@@ -13,6 +13,13 @@ from pku_deadline_agent.zhihuishu_reader import (
 )
 from pku_deadline_agent.grid_session import SessionAuthRequired
 
+# Per-card field gaps are derived from the FINAL surfaced tasks (what the user
+# actually sees), never from transient observations: the reader reads each view
+# twice, so mid-render misses would otherwise be double counted.
+FIELD_GAP_CODES = frozenset({
+    'title_missing', 'deadline_missing', 'deadline_time_missing', 'course_binding_missing',
+})
+
 
 @dataclass(frozen=True)
 class ScrollPolicy:
@@ -160,7 +167,7 @@ class BoundedScrollReader:
         collected: dict[int, ReadTask] = {}
         seen: set[int] = set()
         reasons: list[str] = []
-        issue_tally: dict[str, int] = {}
+        issue_tally: dict[str, set] = {}
         course = None
         total = None
         loaded_peak = loaded_final = scrolls = stable_bottom = 0
@@ -213,7 +220,11 @@ class BoundedScrollReader:
                 unstable_attempts = 0
                 geometry = probe()
                 for issue in report.issues:
-                    issue_tally[issue.code] = issue_tally.get(issue.code, 0) + 1
+                    # Structural codes only; field gaps are derived from the final
+                    # tasks below, so a twice-read view is not counted twice.
+                    if issue.code in FIELD_GAP_CODES:
+                        continue
+                    issue_tally.setdefault(issue.code, set()).add(issue.position)
                 loaded_final = report.coverage.loaded_count
                 has_next_observed = has_next_observed or report.coverage.has_next is True
                 end_visible = geometry['end_visible']
@@ -299,7 +310,21 @@ class BoundedScrollReader:
                     handle.dispose()
                 except Exception:
                     pass
-        tasks = tuple(collected[p] for p in sorted(collected) if collected[p].title)
+        # Surface EVERY position that carries any field, not only the fully bound
+        # ones: a card whose title leaf did not resolve is still a real task the
+        # user can complete by hand in the review page. Dropping it silently is
+        # what made a 5-card list look like a 1-task list.
+        tasks = tuple(collected[p] for p in sorted(collected)
+                      if collected[p].title or collected[p].deadline or collected[p].deadline_date)
+        # Field gaps of the FINAL result: the honest answer to "what is missing".
+        if not course:
+            issue_tally.setdefault('course_binding_missing', set()).add(None)
+        for position, task in collected.items():
+            if not task.title:
+                issue_tally.setdefault('title_missing', set()).add(position)
+            elif task.deadline is None:
+                code = 'deadline_time_missing' if task.deadline_date else 'deadline_missing'
+                issue_tally.setdefault(code, set()).add(position)
         if not course:
             reasons.append('course_not_bound')
         if not bottom_settled:
@@ -323,14 +348,15 @@ class BoundedScrollReader:
         if expected == 0 and not empty_proven:
             inventory = False
             reasons.append('empty_not_proven')
-        fields = bool(len(tasks) == len(seen) and course and all(t.deadline is not None for t in tasks))
+        fields = bool(len(tasks) == len(seen) and course
+                      and all(t.title and t.deadline is not None for t in tasks))
         if not fields:
             reasons.append('fields_incomplete')
         lower_bound = total if total is not None else (loaded_peak if policy.mode != 'virtual' else len(seen))
         coverage = ScrollCoverage(total, loaded_peak, loaded_final, len(seen), len(tasks), scrolls,
                                   bottom_settled, inventory, fields, inventory and fields, basis,
                                   max(0, lower_bound - len(seen)), tuple(dict.fromkeys(reasons)),
-                                  tuple(sorted(issue_tally.items())))
+                                  tuple(sorted((code, len(where)) for code, where in issue_tally.items())))
         return ScrollReport(tasks, coverage, course, evidence)
 
 

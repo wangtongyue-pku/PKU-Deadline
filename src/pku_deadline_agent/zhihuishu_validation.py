@@ -17,12 +17,39 @@ Nothing here writes a database, talks to a model or touches the network.
 from dataclasses import dataclass, fields
 from datetime import datetime
 import json
+import os
+from pathlib import Path
 
 from pku_deadline_agent.zhihuishu_reader import ReadTask
 from pku_deadline_agent.zhihuishu_review import ORIGIN_LABELS
 from pku_deadline_agent.zhihuishu_scroll import ScrollCoverage, ScrollReport
 
 PAYLOAD_VERSION = 1
+# Where the last authorized read is kept. Local, gitignored, and overridable so
+# tests and alternative instances never touch the daily one.
+PAYLOAD_ENV = 'PKU_ZHIHUISHU_PAYLOAD'
+DEFAULT_PAYLOAD = (Path(__file__).resolve().parents[2]
+                   / '.local-tmp' / 'zhs-validation' / 'report.json')
+
+
+def payload_path() -> Path:
+    override = os.environ.get(PAYLOAD_ENV, '').strip()
+    return Path(override) if override else DEFAULT_PAYLOAD
+
+
+def load_latest(path=None) -> ScrollReport | None:
+    """The most recent authorized read, or None when there is none usable.
+
+    Never raises into a page: a missing, moved or hand-edited payload simply means
+    "no real read to show", which falls back to the fictional samples.
+    """
+    source = Path(path) if path is not None else payload_path()
+    try:
+        if not source.exists():
+            return None
+        return decode_report(json.loads(source.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return None
 
 TASK_FIELDS = ('title', 'course', 'deadline', 'deadline_date', 'status', 'kind')
 COVERAGE_FIELDS = tuple(f.name for f in fields(ScrollCoverage))
@@ -70,12 +97,19 @@ def decode_report(payload) -> ScrollReport:
     if evidence not in ORIGIN_LABELS:
         raise ValueError('读取结果缺少可辨认的来源标记。')
     coverage_raw = payload.get('coverage')
-    if not isinstance(coverage_raw, dict) or set(coverage_raw) != set(COVERAGE_FIELDS):
-        raise ValueError('读取结果的覆盖度字段不完整或含未允许字段。')
+    if not isinstance(coverage_raw, dict):
+        raise ValueError('读取结果的覆盖度字段无效。')
+    unknown = set(coverage_raw) - set(COVERAGE_FIELDS)
+    if unknown:
+        raise ValueError(f'读取结果的覆盖度含未允许字段：{sorted(unknown)}')
+    # issue_counts arrived after the first payloads; absent means "not recorded".
+    missing = set(COVERAGE_FIELDS) - set(coverage_raw) - {'issue_counts'}
+    if missing:
+        raise ValueError(f'读取结果的覆盖度字段不完整：{sorted(missing)}')
     reasons = coverage_raw['reasons']
     if not isinstance(reasons, (list, tuple)) or not all(isinstance(r, str) for r in reasons):
         raise ValueError('读取结果的完整性原因无效。')
-    issue_counts = coverage_raw['issue_counts']
+    issue_counts = coverage_raw.get('issue_counts', [])
     if not isinstance(issue_counts, (list, tuple)) or not all(
             isinstance(pair, (list, tuple)) and len(pair) == 2
             and isinstance(pair[0], str) and isinstance(pair[1], int)

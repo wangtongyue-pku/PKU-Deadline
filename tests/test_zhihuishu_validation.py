@@ -78,6 +78,33 @@ def test_issue_counts_survive_the_round_trip():
     assert restored.coverage == coverage
 
 
+def test_load_latest_reads_the_shipped_payload_and_refuses_junk(tmp_path):
+    """The daily payload is local user data: loadable, and never a crash source."""
+    from pku_deadline_agent.zhihuishu_validation import load_latest
+
+    good = tmp_path / 'report.json'
+    good.write_text(json.dumps(encode_report(real_report()), ensure_ascii=False), encoding='utf-8')
+    loaded = load_latest(good)
+    assert loaded is not None and loaded.evidence == 'authorized-real-validation'
+    assert [t.title for t in loaded.tasks] == [t.title for t in real_report().tasks]
+
+    assert load_latest(tmp_path / 'missing.json') is None
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{"version": 99}', encoding='utf-8')
+    assert load_latest(bad) is None
+    broken = tmp_path / 'broken.json'
+    broken.write_text('not json', encoding='utf-8')
+    assert load_latest(broken) is None
+
+
+def test_payload_from_before_issue_counts_still_loads():
+    """Payloads written by the first real read must keep working."""
+    payload = encode_report(real_report())
+    payload['coverage'].pop('issue_counts')
+    restored = decode_report(payload)
+    assert restored.coverage.issue_counts == ()
+
+
 def test_summary_exposes_counts_only():
     summary = summarize(real_report()).as_dict()
     assert set(summary) == {'evidence', 'task_count', 'course_bound', 'titles_present',

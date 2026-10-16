@@ -64,6 +64,47 @@ def test_different_chapter_ordinals_are_not_called_similar():
     assert all(i.category == '待新增' for i in snapshot.items)
 
 
+def test_manual_edit_completes_an_unrecognised_card():
+    """A card the reader could not bind becomes usable once the user fills it in."""
+    from datetime import datetime
+
+    from pku_deadline_agent.time_utils import BEIJING
+    from pku_deadline_agent.zhihuishu_reader import ReadTask
+    from pku_deadline_agent.zhihuishu_review import ManualEdit, apply_edits
+    from pku_deadline_agent.zhihuishu_scroll import ScrollCoverage, ScrollReport
+
+    tasks = (ReadTask('', '虚构翻转课甲', None, None),)
+    coverage = ScrollCoverage(None, 1, 1, 1, 1, 0, True, False, False, False,
+                              'unverified', 0, ('boundary_unverified', 'fields_incomplete'),
+                              (('title_missing', 1), ('deadline_missing', 1)))
+    report = ScrollReport(tasks, coverage, '虚构翻转课甲', 'authorized-real-validation')
+    before = build_review(report, ())
+    assert before.items[0].category == '信息不足'
+
+    edited = apply_edits(report, {1: ManualEdit(
+        title='虚构补全作业', course='虚构翻转课甲',
+        deadline=datetime(2034, 6, 10, 20, tzinfo=BEIJING))})
+    after = build_review(edited, ())
+    assert after.items[0].category == '待新增'
+    assert after.items[0].task.title == '虚构补全作业'
+    # The READ is still partial: corrections never inflate completeness.
+    assert after.report.coverage.complete is False
+    assert after.report.evidence == 'authorized-real-validation'
+
+
+def test_manual_edit_date_only_keeps_unknown_time_and_screens_input():
+    from pku_deadline_agent.zhihuishu_review import ManualEdit, apply_edits
+
+    report = batch_of('虚构作业').report
+    edited = apply_edits(report, {1: ManualEdit(deadline=None, deadline_date='2034-06-15',
+                                                status='未完成')})
+    assert edited.tasks[0].deadline is None and edited.tasks[0].deadline_date == '2034-06-15'
+    with pytest.raises(ValueError):
+        apply_edits(report, {1: ManualEdit(status='已完成中')})
+    with pytest.raises(ValueError):
+        apply_edits(report, {1: 'not-an-edit'})
+
+
 def test_unrelated_titles_are_not_flagged():
     snapshot = batch_of('虚构阅读练习', '虚构数据实验报告')
     assert [i.batch_peers for i in snapshot.items] == [(), ()]

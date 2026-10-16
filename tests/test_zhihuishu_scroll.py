@@ -69,6 +69,23 @@ def test_twenty_task_limit_applies_to_entire_scroll_session(page,mode):
     assert result.coverage.unread_minimum>=3
 
 
+def test_card_without_a_bound_title_is_surfaced_for_manual_completion(page):
+    """A card whose title leaf did not resolve must not be silently dropped.
+
+    It stays in the report with an empty title, the coverage says the fields are
+    incomplete, and the issue tally names the reason - so the review page can ask
+    the user to fill it in instead of the list looking short.
+    """
+    prepare(page,count=3)
+    page.eval_on_selector_all('.homework-item .tit','es=>es[1].remove()')
+    result=collect(page)
+    assert len(result.tasks)==3 and result.coverage.read_count==3
+    assert result.tasks[1].title=='' and result.tasks[1].deadline is not None
+    assert not result.coverage.fields_complete
+    assert 'fields_incomplete' in result.coverage.reasons
+    assert dict(result.coverage.issue_counts).get('title_missing')==1
+
+
 def test_namesakes_are_distinct_tasks_not_merged(page):
     prepare(page,count=5,namesake=True)
     result=collect(page)
