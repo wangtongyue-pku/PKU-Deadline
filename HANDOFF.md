@@ -1,5 +1,19 @@
 # Codex / DSH 交接记录
 
+## 当前：智慧树首次受限真实读取（2026-10-16，DSH，已执行）
+
+- 用户授权一次真实只读验证（临时浏览器、本人登录、自选课程、≤5 条、≤1 次定位性滚动、只取标题 / 课程 / 截止 / 状态、不进试卷考试学习内容、不写正式库或沙箱、不保存登录状态、不调用 AI），并在过程中**单独同意了一处边界规范化**。全量 **1208 passed / 0 失败 / 0 跳过**。
+- **结果**：读取成功，来源标记 `authorized-real-validation`（真实授权读取，不是虚构）。当场「未完成」筛选激活、页面有 5 张卡片；读取器**只完整绑定 1 条任务**（observed 2 / loaded 5 / `fields_incomplete` / `displayed_total` 未知 / 边界未验证）→ **接线在真实数据上端到端可用，但现有 validation-only 配置的字段绑定只覆盖当前卡片的一部分**；这是下一件要修的事，不夸大。写入为零：未写正式库、未写沙箱、未调用 AI；临时浏览器已关闭，**含登录状态的临时配置目录已整目录删除**。
+- 新模块与脚本：`zhihuishu_validation.py`（**白名单载荷**：只允许 title / course / deadline / deadline_date / status / kind + 覆盖度 + 来源标记离开浏览器进程，结构上排除平台 ID、链接、页面原文与滚动片段；`summarize()` 只输出计数与布尔值）、`scripts/zhihuishu_real_read.py`（范围封顶的真实会话：可见窗口 → 等操作者确认 → 渲染轮询 → 页与 iframe 候选 → 有界读取 → 白名单落盘）、`scripts/zhihuishu_validation_view.py`（8510 只读预览，`import_target=None`，页面不提供任何入库入口）。
+- **本轮排掉的六个真实坑（后续接手必读）**：
+  1. Playwright `browser.new_context()` 启动会给 Chrome 加 `--no-startup-window`，**根本没有可见窗口**；用户只能在自己日常 Chrome 里操作，脚本永远看不到。改用项目已验证的 `launch_persistent_context`（编程网格 6C-2 同款）。
+  2. 保留配置目录后 Chrome **会话恢复**会把有价值的标签放进 Playwright 不上报的窗口。启动时先关闭全部恢复页，只留**一个受控标签**。
+  3. 真实页面里的**临时 `about:blank` iframe 曾被当作虚构夹具**并返回「成功」的空结果（假成功）。已修：读取器只把**顶层** about:blank 视为虚构，嵌套空白框架一律拒绝；脚本只接受 http(s) 目标、页面优先于 iframe。
+  4. 真实列表地址是 `/stu/courseInfo/homeworkExam`（**无末尾斜杠**，带课程查询）。经用户同意做**最小规范化**：同一路由带 / 不带一个末尾斜杠都放行；仍按原始路径比较，`%2F`、大小写变体、`/start`、`/answer`、`/exam/`、其他主机一律阻断（含回归测试）。
+  5. 门户自身导航会把地址停在 `www.zhihuishu.com` 根路径且列表不加载；**直连列表 URL 缺少课程参数时也只渲染框架、永远转圈**。可用路径是用户把带课程参数的列表地址粘进受控标签（查询内容**从不记录**，脚本只写脱敏结构形态）。
+  6. 我最初的清理按 `playwright` 关键字找进程，**对自定义 `--user-data-dir` 的 persistent context 根本匹配不到**，残留进程锁住配置目录导致 `TargetClosedError`。改为按配置目录路径精确清理，且不触碰用户自己的浏览器。
+- 临时数据都在已忽略的 `.local-tmp/zhs-validation/`（`watch.log` 只有脱敏地址形态；`probe.json` 只有节点计数；`report.json` 只有白名单字段）。**待办**：① 针对上面第 2 条的字段绑定缺口完善 validation 配置（真实观察，不猜）；② 用户已同意、放在正式入库之前的「同批相似标题在预览阶段提前提示 + 允许明确确认相互独立」；③ 生产写入仍**未授权**。
+
 ## 当前：智慧树读取结果接入审核页（2026-10-16，DSH 接线轮）
 
 - 起点 `codex/zhihuishu-feasibility` / `2407745`（人工确认入库契约已提交），全量基线 **1187**；本轮后 **1195 passed / 0 失败 / 0 跳过**（+8，`tests/test_zhihuishu_wire.py`）。用户本轮只授权「读取器结果 → 预览页」接线与用虚构页面验证链路：**未授权正式 SQLite 写入，未授权访问真实智慧树**。没有连接账号、没有调用 AI、没有触碰正式库。

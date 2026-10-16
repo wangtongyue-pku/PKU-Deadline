@@ -289,6 +289,19 @@ class StubPage:
         return next(self.snapshots)
 
 
+def test_blank_nested_frame_is_not_a_fictional_page():
+    """A blank iframe inside a real session must never be labeled synthetic.
+
+    Playwright exposes ``.page`` on a Frame and not on a Page; the reader uses that
+    to tell the offline about:blank fixture apart from an auxiliary blank frame.
+    """
+    frame = StubPage(url='about:blank')
+    frame.page = object()
+    with pytest.raises(PermissionError):
+        read(frame)
+    assert frame.calls == 0
+
+
 @pytest.mark.parametrize('url', ['https://wenda.zhihuishu.com/course/aaaa', 'file:///private',
                                 'https://evil.invalid/', 'https://wenda.zhihuishu.com/exam/aaaa'])
 def test_real_page_gate_precedes_dom_access(url):
@@ -488,6 +501,21 @@ def test_validation_summary_rejects_invalid_number_of_reads(reports):
 
 def test_observed_list_route_is_allowed_only_in_explicit_validation_mode(observed_layout):
     observed_layout.url = 'https://wenda.zhihuishu.com' + FLIPPED_HOMEWORK_LIST_PATH
+    reader = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE)
+    with pytest.raises(PermissionError):
+        reader.read(observed_layout, allow_real=True)
+    result = reader.read(observed_layout, allow_real=True, validation_only=True)
+    assert len(result.tasks) == 3 and not result.coverage.view_complete
+
+
+def test_same_list_route_without_the_trailing_slash_or_with_a_course_query(observed_layout):
+    """The real page keeps the path slash-free once a course query is present.
+
+    Same page, same route: only the trailing slash is normalised away. The mode
+    requirement is unchanged, and a query string never widens what is allowed.
+    """
+    observed_layout.url = ('https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam'
+                           '?courseId=11111111')
     reader = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE)
     with pytest.raises(PermissionError):
         reader.read(observed_layout, allow_real=True)

@@ -27,6 +27,18 @@ REAL_HOST = 'wenda.zhihuishu.com'
 FLIPPED_HOMEWORK_LIST_PATH = '/stu/courseInfo/homeworkExam/'
 
 
+def is_observed_list_path(path: str) -> bool:
+    """The observed list route, with or without ONE trailing slash.
+
+    The site serves the same page as ``/stu/courseInfo/homeworkExam/`` and as
+    ``/stu/courseInfo/homeworkExam`` (a course query keeps the path slash-free).
+    ONLY that normalisation is accepted: the comparison uses the raw path, so a
+    percent-encoded (``%2F``) or case-varied route stays refused, and no other
+    exam route is reachable.
+    """
+    return path in (FLIPPED_HOMEWORK_LIST_PATH, FLIPPED_HOMEWORK_LIST_PATH.rstrip('/'))
+
+
 class ReaderError(SessionLayoutChanged):
     """Fixed, non-sensitive errors; never echo browser exception text."""
 
@@ -319,6 +331,10 @@ class BoundedTaskListReader:
             raise ValueError('验证模式必须显式传入布尔值。')
         url = page.url
         if url == 'about:blank':
+            # A blank NESTED frame inside a real page is not a fictional fixture;
+            # only a top-level blank page (the offline test harness) is synthetic.
+            if getattr(page, 'page', None) is not None:
+                raise PermissionError('嵌套的空白框架不作为虚构页面；未读取任务字段。')
             verification = 'synthetic-validation' if validation_only else 'synthetic'
             base = f'https://{REAL_HOST}/'
         else:
@@ -328,7 +344,7 @@ class BoundedTaskListReader:
                         and not parts.username and not parts.password and parts.port in (None, 443)
                         and (not re.search(r'exam|paper|answer|submit|video|learn|login|auth',
                                            unquote(parts.path), re.I)
-                             or (validation_only and parts.path == FLIPPED_HOMEWORK_LIST_PATH)))
+                             or (validation_only and is_observed_list_path(parts.path))))
             except ValueError:
                 safe = False
             if not safe or allow_real is not True:
