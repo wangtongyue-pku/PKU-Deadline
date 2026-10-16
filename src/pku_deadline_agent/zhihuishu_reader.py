@@ -1,0 +1,334 @@
+"""Read one already-open unfinished-homework view, without login or navigation.
+
+No SQLite, AI, HTTP, cookie/storage access or persistent browser state. The caller
+owns the existing Playwright Page/context and must close it. Real account use
+needs separate human authorization AND a genuinely verified layout profile.
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Protocol
+from urllib.parse import unquote, urljoin, urlsplit
+
+from pku_deadline_agent.grid_session import SessionAuthRequired, SessionLayoutChanged
+from pku_deadline_agent.privacy import scan_privacy
+from pku_deadline_agent.sources import SourceRejected, SourceUnverified
+from pku_deadline_agent.zhihuishu_display import parse_display_deadline
+from pku_deadline_agent.zhihuishu_dom import SNAPSHOT_SCRIPT
+
+MAX_VISIBLE_TASKS = 20
+REAL_HOST = 'wenda.zhihuishu.com'
+
+
+class ReaderError(SessionLayoutChanged):
+    """Fixed, non-sensitive errors; never echo browser exception text."""
+
+
+class ReaderLimitExceeded(ReaderError):
+    def __init__(self, loaded: int, visible: int):
+        self.loaded, self.visible = loaded, visible
+        super().__init__(f'当前加载 {loaded} 个卡片、可见 {visible} 个；超过本次上限，未读取任务字段。')
+
+
+@dataclass(frozen=True)
+class ListProfile:
+    """Unobserved selectors have NO production defaults. Not page-supplied code.
+
+    Set real_verified only after an authorized inspection has verified ALL field,
+    course and coverage selectors; fictional fixtures do not qualify.
+    No real_verified profile is shipped in this iteration.
+    """
+
+    title: str
+    course_scope: str
+    course: str
+    deadline: str = '.homework-item-time'
+    total: str | None = None
+    next: str | None = None
+    empty: str | None = None
+    loading: str | None = None
+    lazy: str | None = None
+    virtual: str | None = None
+    card_course: str | None = None
+    link: str | None = None
+    task_id_attribute: str | None = None
+    course_id_attribute: str | None = None
+    enrollment_id_attribute: str | None = None
+    real_verified: bool = False
+
+    def __post_init__(self):
+        for name in ('title', 'course_scope', 'course'):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError('必须显式提供字段与课程范围选择器；不猜实际页面结构。')
+        for name, value in asdict(self).items():
+            if name.endswith('_attribute') and value is not None:
+                if not re.fullmatch(r'data-(?!v-|.*(?:token|cookie|auth|user|account|password|key|secret|session|credential|email|student))[a-z-]{1,40}', value):
+                    raise ValueError('仅允许已核验的非认证 data 标识属性；不读取任意属性。')
+        if type(self.real_verified) is not bool:
+            raise ValueError('配置核验标记必须是布尔值。')
+
+
+@dataclass(frozen=True)
+class ReadTask:
+    # These objects are private, in-memory observations, not diagnostic log data.
+    title: str = field(repr=False)
+    course: str | None = field(repr=False)
+    deadline: datetime | None = field(default=None, repr=False)
+    deadline_date: str | None = field(default=None, repr=False)
+    source_url: str | None = field(default=None, repr=False)
+    observed_task_id: str | None = field(default=None, repr=False)
+    observed_course_id: str | None = field(default=None, repr=False)
+    observed_enrollment_id: str | None = field(default=None, repr=False)
+    status: str = '未完成'
+    kind: str = 'homework'
+    opens_at: datetime | None = None  # Never filled from a deadline or exam page.
+    identity_verified: bool = False  # One snapshot cannot prove ID stability.
+
+
+@dataclass(frozen=True)
+class ReadIssue:
+    code: str
+    position: int | None = None  # Ephemeral viewport ordinal, NOT a source ID.
+
+
+@dataclass(frozen=True)
+class Coverage:
+    loaded_count: int
+    visible_count: int
+    read_count: int
+    rejected_count: int
+    outside_view_count: int
+    displayed_total: int | None
+    has_next: bool | None
+    loading: bool
+    lazy: bool
+    virtual: bool
+    unread_minimum: int
+    unread_scope: tuple[str, ...]
+    view_complete: bool
+
+
+@dataclass(frozen=True)
+class ReadReport:
+    tasks: tuple[ReadTask, ...] = field(repr=False)
+    coverage: Coverage
+    issues: tuple[ReadIssue, ...]
+    verification: str  # 'synthetic' or 'authorized-real-profile'; not model output.
+
+    @property
+    def fields_valid(self) -> bool:
+        return not self.issues
+
+    @property
+    def ready_for_sync(self) -> bool:
+        # This iteration has no verified stable identities or write gateway.
+        return False
+
+    @property
+    def confirmed_empty(self) -> bool:
+        return self.coverage.view_complete and self.coverage.displayed_total == 0
+
+    def require_sync_ready(self) -> None:
+        raise SourceUnverified('仅为有界读取结果；身份稳定性及审核入库尚未验证，不能直接同步。')
+
+
+class ReadablePage(Protocol):
+    url: str
+
+    def evaluate(self, expression: str, arg: dict) -> dict: ...
+
+
+def _text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > limit:
+        raise SourceRejected('字段类型或长度不正确。')
+    result = re.sub(r'\s+', ' ', value).strip() or None
+    if result and scan_privacy(result).blocked:
+        raise SourceRejected('字段含认证资料或无法确认的风险。')
+    return result
+
+
+def _source_link(value: str | None, base: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 2000 or any(c.isspace() for c in value):
+        raise SourceRejected('来源链接无效。')
+    result = urljoin(base, value)
+    try:
+        p = urlsplit(result)
+        unsafe = (p.scheme != 'https' or p.hostname != REAL_HOST or p.username or p.password
+                  or p.port not in (None, 443) or p.query or p.fragment or '\\' in result
+                  or re.search(r'exam|paper|answer|submit|video|learn|login|auth', unquote(p.path), re.I)
+                  or any(f.blocks_sending and f.kind != '不明长串（需本地核查）'
+                         for f in scan_privacy(unquote(result)).findings))
+    except ValueError:
+        unsafe = True
+    if unsafe:
+        raise SourceRejected('来源链接未通过只读安全规则；不访问或改写。')
+    return result
+
+
+def _identifier(value: str | None) -> str | None:
+    # IDs are allowed to be opaque, but never interpreted as proven identities.
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,200}', value):
+        raise SourceRejected('观察到的标识格式无效。')
+    if any(f.blocks_sending and f.kind != '不明长串（需本地核查）'
+           for f in scan_privacy(value).findings):
+        raise SourceRejected('标识字段含认证资料。')
+    return value
+
+
+def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
+    counts = snapshot['counts']
+    issues: list[ReadIssue] = []
+    tasks: list[ReadTask] = []
+    course = _text(snapshot['course'], 100)
+    if not course:
+        issues.append(ReadIssue('course_binding_missing'))
+    scope_ids = tuple(_identifier(snapshot[key]) for key in ('course_id', 'enrollment_id'))
+    observed_ids: set[str] = set()
+    for raw in snapshot['tasks']:
+        position = raw['position']
+        if raw.get('error'):
+            issues.append(ReadIssue(raw['error'], position))
+            continue
+        try:
+            title = _text(raw['title'], 200)
+            if not title:
+                issues.append(ReadIssue('title_missing', position))
+                continue
+            card_course = _text(raw['course'], 100)
+            if card_course and card_course != course:
+                issues.append(ReadIssue('course_binding_conflict', position))
+                continue
+            due, date_only = parse_display_deadline(_text(raw['deadline'], 80))
+            if due is None:
+                issues.append(ReadIssue('deadline_time_missing' if date_only else 'deadline_missing', position))
+            observed_id = _identifier(raw['task_id'])
+            if observed_id and observed_id in observed_ids:
+                issues.append(ReadIssue('duplicate_observed_id', position))
+            if observed_id:
+                observed_ids.add(observed_id)
+            link = None
+            try:
+                link = _source_link(raw['source_url'], base)
+            except SourceRejected:
+                issues.append(ReadIssue('unsafe_source_link', position))
+            tasks.append(ReadTask(title, course, due, date_only, link, observed_id, *scope_ids))
+        except SourceRejected:
+            issues.append(ReadIssue('invalid_task_field', position))
+    total_text = counts['total_text']
+    total = None
+    if total_text is not None:
+        match = re.fullmatch(r'共\s*([0-9]{1,6})\s*[条项]', total_text)
+        if match:
+            total = int(match[1])
+        else:
+            issues.append(ReadIssue('total_format_changed'))
+    if total is not None and total < counts['loaded']:
+        issues.append(ReadIssue('total_count_conflict'))
+    if not tasks and not (snapshot['empty'] and total == 0 and counts['loaded'] == 0):
+        issues.append(ReadIssue('empty_not_proven'))
+    if snapshot['empty'] and counts['loaded']:
+        issues.append(ReadIssue('empty_state_conflict'))
+    scope: list[str] = []
+    if counts['outside_view']:
+        scope.append('loaded_outside_view')
+    if total is None:
+        scope.append('total_unknown')
+    elif total > len(tasks):
+        scope.append('displayed_total_not_read')
+    if counts['has_next']:
+        scope.append('later_pages')
+    for flag in ('loading', 'lazy', 'virtual'):
+        if counts[flag]:
+            scope.append(flag)
+    coverage = Coverage(counts['loaded'], counts['visible'], len(tasks),
+                        counts['visible'] - len(tasks), counts['outside_view'], total,
+                        counts['has_next'], counts['loading'], counts['lazy'], counts['virtual'],
+                        max(0, max(counts['loaded'], total or 0) - len(tasks)),
+                        tuple(scope), not scope and not issues)
+    return ReadReport(tuple(tasks), coverage, tuple(issues), verification)
+
+
+class BoundedTaskListReader:
+    """Only two atomic observations of the same view; no retry/scroll/click/goto.
+
+    Real use consumes authorization supplied by the human through the caller.
+    A verified layout is an additional engineering gate, never a substitute for
+    that authorization. No currently shipped profile is real-verified.
+    """
+
+    def __init__(self, profile: ListProfile, *, limit: int = MAX_VISIBLE_TASKS):
+        if type(limit) is not int or not 1 <= limit <= MAX_VISIBLE_TASKS:
+            raise ValueError('可见任务上限必须为 1–20。')
+        self.profile, self.limit = profile, limit
+
+    def read(self, page: ReadablePage, *, allow_real: bool = False) -> ReadReport:
+        url = page.url
+        if url == 'about:blank':
+            verification = 'synthetic'
+            base = f'https://{REAL_HOST}/'
+        else:
+            try:
+                parts = urlsplit(url)
+                safe = (parts.scheme == 'https' and parts.hostname == REAL_HOST
+                        and not parts.username and not parts.password and parts.port in (None, 443)
+                        and not re.search(r'exam|paper|answer|submit|video|learn|login|auth',
+                                          unquote(parts.path), re.I))
+            except ValueError:
+                safe = False
+            if not safe or allow_real is not True:
+                raise PermissionError('未授权的页面或真实读取；未读取任务字段。')
+            if not self.profile.real_verified:
+                raise PermissionError('字段 / 课程 / 完整性配置仅经模拟验证，不能用于真实页面。')
+            verification, base = 'authorized-real-profile', url
+        params = asdict(self.profile) | {'limit': self.limit}
+        observations = []
+        for _ in range(2):
+            if page.url != url:
+                raise ReaderError('读取期间页面跳转，已停止。')
+            try:
+                snapshot = page.evaluate(SNAPSHOT_SCRIPT, params)
+            except Exception:
+                raise ReaderError('DOM 读取失败或页面结构变化；未生成可信结果。') from None
+            if not isinstance(snapshot, dict):
+                raise ReaderError('DOM 返回结构无效。')
+            code = snapshot.get('error')
+            if code == 'visible_task_limit':
+                c = snapshot['counts']
+                raise ReaderLimitExceeded(c['loaded'], c['visible'])
+            if code == 'authentication_required':
+                raise SessionAuthRequired('需要用户本人重新登录；没有任务读取结果。')
+            if code:
+                raise ReaderError('列表结构 / 选中视图或字段发生变化，已停止。')
+            observations.append(snapshot)
+        if page.url != url or observations[0] != observations[1]:
+            raise ReaderError('两次有界观察不一致，页面仍在变化；请等待加载完成。')
+        try:
+            return _normalize(observations[0], base=base, verification=verification)
+        except (KeyError, TypeError, ValueError, SourceRejected):
+            raise ReaderError('读取结果校验失败；未当成没有任务。') from None
+
+
+def possible_matches(task: ReadTask, previous: tuple[ReadTask, ...]) -> tuple[int, ...]:
+    """Suggestions only: keep namesakes distinct, dates out of the identity.
+
+    Return temporary candidate positions for explicit review; NEVER a merge key.
+    Even a repeated observed DOM ID is not verified stable across page reloads.
+    """
+    def normalized(value):
+        return re.sub(r'\s+', ' ', unicodedata.normalize('NFKC', value or '')).strip().casefold()
+
+    if not task.course:
+        return ()
+    return tuple(i for i, old in enumerate(previous)
+                 if normalized(task.course) == normalized(old.course)
+                 and normalized(task.title) == normalized(old.title) and task.kind == old.kind)

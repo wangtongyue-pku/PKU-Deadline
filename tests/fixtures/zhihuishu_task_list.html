@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8">
+<title>虚构翻转课列表：仅用于离线测试</title>
+<style>
+body { margin: 8px; font: 14px sans-serif; }
+.fixture-course-scope { width: 800px; }
+.homework-item { border: 1px solid #ccc; margin: 8px; padding: 8px; }
+.homework-item-time span { display: inline-block; }
+.fixture-title { font-size: 16px; margin: 0; }
+.fixture-hidden { display: none; }
+.homework-item-time .fixture-hidden { display: none; }
+</style>
+<!-- Only card/time/filter classes are confirmed real structure. All fixture-*
+     fields, attributes, links, counts and pagination below are INVENTED.
+     This file is neither a page export nor proof of real selectors. -->
+<div class="ant-tabs-tab ant-tabs-tab-active" aria-selected="true">作业</div>
+<div class="ant-tabs-tab" aria-selected="false">考试</div>
+<section class="fixture-course-scope" data-course-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+         data-enrollment-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">
+  <h1 class="fixture-course-name">虚构课程甲</h1>
+  <div class="ant-tabs-tabpane-active">
+    <div class="state-tabs">
+      <span class="menu-pane">全部</span>
+      <span class="menu-pane active">未完成</span>
+      <span class="menu-pane">已完成</span>
+    </div>
+    <div class="fixture-total">共 2 条</div>
+    <button class="fixture-next" disabled>下一页</button>
+    <div class="homework-content">
+      <div class="homework-item" data-task-id="11111111111111111111111111111111">
+        <div><h2 class="fixture-title">虚构作业甲</h2><button onclick="window.sideEffects++">开始做题</button></div>
+        <p>虚构要求；提到的考试开放时间不是这项作业的截止字段。</p>
+        <div class="homework-item-time"><span class="fixture-deadline">截止时间： 2031.04.18 20:30</span><span class="fixture-hidden">认证资料不属于可见字段</span></div>
+        <a class="fixture-source" href="https://wenda.zhihuishu.com/course/aaaa/homework/1111">来源</a>
+      </div>
+      <div class="homework-item" data-task-id="22222222222222222222222222222222">
+        <div><h2 class="fixture-title">虚构作业乙</h2><button onclick="window.sideEffects++">开始做题</button></div>
+        <p>虚构要求，与第一条内容无关。</p>
+        <div class="homework-item-time"><span class="fixture-deadline">截止时间： 2031.05.02 00:00</span><span>0条评论</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+<script>window.sideEffects = 0;</script>
+</html>

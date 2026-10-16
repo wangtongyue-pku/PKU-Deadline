@@ -10,6 +10,8 @@
 
 ## 已授权范围与确认边界
 
+- **有界列表读取器本轮范围（2026-10-16）**：用户授权以虚构页面开发独立读取器、字段归属和列表完整性校验，完成全量测试 / 文档 / 本地提交后暂停。本轮不接 SQLite、不启动自动同步，不使用真实账号。真实验证须先说明一门课 / 一个列表、≤20 条可见项范围并另行授权；前次核验不能复用为新授权。`zhihuishu_reader.py` 接收调用方已有 Page，不开发登录 / 导航 / 持久化；未提供完整真实配置，模拟配置不得直接用于真实页面。`ReadTask` 只含内存候选，观察到的 ID 不等于稳定 ID；`ready_for_sync=False` 是本轮不变量。
+
 - **首次受限核验已结束（2026-10-16）**：用户回复“已打开”后，已对一门翻转课的“作业 → 未完成”当前屏做一次有界 DOM 检查，随后关闭临时 context / browser，未导出认证状态。确认 `.homework-item-time` 位于 `.homework-item`，外层为 `.homework-content`；屏内检查的 2 个截止字段可读且点分日期分钟格式可解析。“作业”具有 `aria-selected=true`，“未完成”具有 `menu-pane active`。仅证明本次页面的这部分结构，不证明整课完整、课程绑定、任务稳定 ID、标题 / 要求字段定位、空态或考试布局；未读取完整任务正文、未写库 / 调用模型。核验授权已经用于本次检查，后续真实重连或扩展范围须另行说明并授权；离线开发仍可继续。详见 `docs/zhihuishu_list_inspection.md` 最新结果。
 
 - **首次受限真实核验已获授权（2026-10-15）**：在明确说明范围后，用户回复“可以试试”。仅授权本次独立临时 Chrome 中，由本人登录并停留一门翻转课的“作业 → 未完成”列表，再检查已加载当前屏最多 20 项的可见字段与 DOM 结构。Agent 不代输凭据、不点击任务 / 考试、不翻页或滚动、不写库、不调用模型、不保存认证状态、不启动定时。用户回复已准备好之前不得读取页面内容；工具输出只保留结构 / 计数 / 格式验证结果，不输出真实任务正文、日期、标识或认证资料。此授权不扩展为多课自动同步或永久会话复用，不重复询问已获授权的同一核验范围。临时窗口结束时关闭 context / browser。此前“未授权”的历史说明以本条为准。
@@ -57,6 +59,7 @@
 - `reminders.py`：独立 Python CLI、SQLite 事务抢占 / 再检查、档位去重、Windows Forms 本地通知。默认 dry-run，只有 --notify 才弹窗；不读取 API 配置，无远程连接。
 - `sources.py`：第五阶段平台无关适配器契约。统一字段 `source` / `course` / `task_title` / `task_type` / `published_at` / `deadline` / `source_url` / `source_id` / `status` / `last_updated`，加 `FetchResult` 与 `SourceCapabilities`、异常层级和注册表。空值保持为空，不编造；只接受带时区的 ISO 8601 并统一转北京时间；未声明增量能力时 `fetch(since=...)` 必须抛 `SourceUnsupported`，不得静默退化为全量；`external_key()` 只用「来源 + 平台对象标识」，与标题无关；契约中不得出现存放凭据的字段；本模块不得 import 任何可联网库。**结构损坏必须与「没有作业」严格区分**：无法解析的条目计入 `rejections`，无法确认是否有任务的条目计入 `warnings`，只有明确为空才是零记录。
 - `zhihuishu_adapter.py`：第八阶段离线契约原型，接受本项目自定义规范，**不是实际智慧树接口响应解析器**。不注册产品来源、无网络 / 凭据 / 写库入口。课程结束、课程学习、视频、章节测试、作业、考试六种语义独立；开放时间 / 原始日期文字 / 学习要求由 `ZhihuishuEntry` 与 SourceRecord 一起保留。来源键包含修读 / 学期、课程、种类与任务 ID，不含标题或日期；缺标识不猜。`plan_zhihuishu` 仅以仓储替身复用 `plan_records`；schema v4 仓储明确拒绝，后续来源与元数据迁移须备份 / 事务 / 回滚测试。报告见 `docs/zhihuishu_feasibility.md`，阶段完成后等待用户确认，不擅自连接。
+- `zhihuishu_reader.py` / `zhihuishu_dom.py`：有界只读 Page 观察与标准化候选，不直接生成可入库 SourceRecord。逐卡片取字段，排除隐藏 / 屏外文本，拒绝嵌套 / 重叠 / 多义字段和课程错误绑定；两次原子观察须一致，20 条上限在读字段前检查。总数 / 已加载 / 可见 / 读取 / 未读范围分别报告，分页 / 懒加载 / 虚拟化 / 缺字段不声称完整。默认仅虚构 about:blank；真实页面须 `allow_real=True` 加真正核验过的完整 ListProfile，仓库目前没有这样的真实配置。ID 仅观察、不认稳定，`possible_matches` 只给人工候选，永不合并同名任务。详见 `docs/zhihuishu_reader.md`，模拟 HTML 不得描述为真实 DOM 导出。
 - **`complete` 与 `trustworthy` 不得混用（第五阶段两次评审的结论，第六阶段不变量）**：`complete` 仅表示「读到的条目都能转换」，**不是**数据完整的证明；`trustworthy` 才表示「整批都有交代」（无 rejection 且无 warning）；`confirmed_empty` 是「该来源确实没有任务」的**唯一**凭证。**破坏性决定（删除、取消、标记完成本地任务）必须先通过 `require_trustworthy()` / 检查 `trustworthy`；无法确认的课程必须保留既有本地任务**；「零记录 + `complete=True`」永远不足以推断「没有作业」。第六阶段同步层必须把这条写成独立测试，且不得被重构绕过。
 - `mock_sources.py`：第五阶段**离线**模拟适配器（教学网 / 编程网格形状），只用虚构数据与内存传输替身；不联网、不安装、不登录。`ProgrammingGridJsonAdapter` 的结构按 2026-10-11 真实响应编写，内容虚构。
 - `sync.py`：第六阶段 6A/6B 本地导入与差异计算。`load_grid_file` 只读文件并拒绝空 / 超大 / 非 UTF-8 / 非 JSON / 非对象输入；`plan_sync` **只读**，按平台 ID 判定 new / unchanged / deadline_changed / possible_duplicate，**不生成删除提案**；`apply_sync_plan` 经 `require_trustworthy()` 与第四阶段审核导入写库；`plan_from_fetch` 把多门课文档合成一个方案。`plan_records` 是与第七阶段共用的规划核心（按来源定制措辞与任务类型映射），**两个来源必须共用它**，不得各自复制一份以免规则漂移。
