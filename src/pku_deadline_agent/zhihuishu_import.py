@@ -7,6 +7,7 @@ never pretend to be platform IDs. Core schema v4 + opt-in extension version 1.
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -74,6 +75,66 @@ class SandboxImportTarget:
 
 
 @dataclass(frozen=True)
+class ProductionImportTarget:
+    """The ordinary user database, usable ONLY with explicit authorization.
+
+    Deliberately the mirror image of :class:`SandboxImportTarget`: it refuses a
+    sandbox-marked database, and it cannot even be constructed without
+    ``authorized=True``. Real evidence may go here; fictional evidence may not.
+    """
+
+    path: Path = field(repr=False)
+    database_id: str = field(repr=False)
+
+    @classmethod
+    def open(cls, path=None, *, authorized: bool = False):
+        if authorized is not True:
+            raise PermissionError('正式库写入需要本次明确授权。')
+        target = Path(path) if path is not None else database_path()
+        target = target.resolve()
+        if not target.exists():
+            raise PermissionError('正式任务库不存在；请先正常启动应用完成初始化。')
+        with sqlite3.connect(target.as_uri() + '?mode=ro', uri=True) as connection:
+            if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zhs_sandbox_guard'"
+                    ).fetchone():
+                raise PermissionError('这是专用模拟库，不是正式任务库。')
+        return cls(target, 'production:' + hashlib.sha256(str(target).encode('utf-8')).hexdigest()[:16])
+
+    def check(self, connection=None):
+        """Re-verify under the write lock: still the formal, non-sandbox database."""
+        if self.database_id != 'production:' + hashlib.sha256(
+                str(self.path.resolve()).encode('utf-8')).hexdigest()[:16]:
+            raise PermissionError('正式库身份已变化。')
+        if connection is None:
+            with sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True) as c:
+                self._verify(c)
+            return
+        self._verify(connection)
+
+    def _verify(self, connection):
+        if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zhs_sandbox_guard'"
+                ).fetchone():
+            raise PermissionError('这是专用模拟库，不是正式任务库。')
+        if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
+            raise ValueError('正式库核心版本不符；本入口不自动升级旧核心库。')
+
+
+def is_production(target) -> bool:
+    return isinstance(target, ProductionImportTarget)
+
+
+def _require_matching_evidence(target, report) -> None:
+    """Fictional material stays in sandboxes; real reads stay out of them."""
+    fictional = report.evidence.startswith('synthetic')
+    if is_production(target) and fictional:
+        raise PermissionError('虚构数据不能写入正式数据库。')
+    if not is_production(target) and not fictional:
+        raise PermissionError('真实读取结果只能写入正式数据库；沙箱只接受虚构数据。')
+
+
+@dataclass(frozen=True)
 class ReviewedImportBatch:
     snapshot: ReviewSnapshot = field(repr=False)
     choices: tuple[tuple[int, ImportDecision], ...] = field(repr=False)
@@ -91,10 +152,10 @@ def _batch_payload(snapshot, choices, unknown_deadlines, associations, database_
 
 
 def prepare_import(target, snapshot, choices, *, unknown_deadlines=frozenset(), associations=None):
-    if not isinstance(target, SandboxImportTarget): raise PermissionError('仅开放专用模拟库写入。')
+    if not isinstance(target, (SandboxImportTarget, ProductionImportTarget)):
+        raise PermissionError('未授权的写入目标。')
     target.check()
-    if not snapshot.report.evidence.startswith('synthetic'):
-        raise PermissionError('本轮入库仅接受虚构数据。')
+    _require_matching_evidence(target, snapshot.report)
     _require_verified_items(snapshot.report)
     plan = simulate_choices(snapshot, choices, unknown_deadlines=unknown_deadlines)
     if not plan.operations: raise ValueError('请明确选择至少一项新增、关联或改期。')
@@ -158,16 +219,17 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
     Any failure rolls back the entire selected batch (including extension DDL).
     A successful retry returns its original receipt, without replaying writes.
     """
-    if not isinstance(target, SandboxImportTarget): raise PermissionError('正式库写入尚未开放。')
+    if not isinstance(target, (SandboxImportTarget, ProductionImportTarget)):
+        raise PermissionError('未授权的写入目标。')
     target.check()
     if not confirmed: raise ValueError('请审核最终方案并明确确认入库。')
-    if not batch.snapshot.report.evidence.startswith('synthetic'):
-        raise PermissionError('本轮入库仅接受虚构数据。')
+    _require_matching_evidence(target, batch.snapshot.report)
     _require_verified_items(batch.snapshot.report)
     partial = not batch.snapshot.report.coverage.complete
     if partial and not partial_confirmed:
         raise ValueError('本次仅导入部分任务，并非完整同步；请明确确认。')
-    if batch.database_id != target.database_id: raise ValueError('方案不属于当前模拟库。')
+    if batch.database_id != target.database_id:
+        raise ValueError('方案不属于当前写入目标。')
     expected = fingerprint(_batch_payload(batch.snapshot,batch.choices,batch.unknown_deadlines,
                                           batch.associations,batch.database_id))
     if expected != batch.digest: raise ValueError('保存方案已变化，需重新审核。')

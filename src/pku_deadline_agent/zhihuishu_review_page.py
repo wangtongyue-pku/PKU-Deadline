@@ -25,14 +25,20 @@ from pku_deadline_agent.zhihuishu_review import (
     simulate_choices,
 )
 from pku_deadline_agent.zhihuishu_samples import sample_review_data
-from pku_deadline_agent.zhihuishu_import import prepare_import, apply_import, source_associations
+from pku_deadline_agent.zhihuishu_import import (
+    ProductionImportTarget,
+    apply_import,
+    is_production,
+    prepare_import,
+    source_associations,
+)
 from pku_deadline_agent.zhihuishu_validation import load_latest
 
 PREFIX = 'zhs_review_'
 # Session keys that hold USER INPUT (which source to review, manual corrections).
 # They survive invalidation on purpose: dropping them would silently discard what
 # the user typed. Everything else under PREFIX is derived and must be re-confirmed.
-KEPT_INPUTS = (PREFIX + 'source', PREFIX + 'edits')
+KEPT_INPUTS = (PREFIX + 'source', PREFIX + 'edits', PREFIX + 'prod_authorize')
 ACTIONS = {'暂不处理': 'skip', '拟新增独立任务': 'new', '拟关联已有任务': 'link', '拟修改已有截止': 'update'}
 REASONS = {'boundary_unverified': '列表边界尚未验证', 'displayed_total_unknown': '页面总数未知',
            'fields_incomplete': '部分任务字段缺失', 'task_limit': '达到累计任务上限',
@@ -131,23 +137,43 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
     if import_target is not None:
         try:
             import_target.check()
-            if path is None or import_target.path.resolve() != Path(path).resolve():
+            if not is_production(import_target) and (
+                    path is None or import_target.path.resolve() != Path(path).resolve()):
                 raise PermissionError('模拟目标与预览库不一致。')
             associations_available = source_associations(import_target)
         except (sqlite3.Error, OSError, ValueError, PermissionError):
             invalidate_review()
-            st.error('无法验证专用模拟库，入库入口关闭。')
+            st.error('无法验证写入目标，入库入口关闭。')
             return
-        if not fictional:
-            # Real-read data never reaches any database until production writes
-            # are explicitly authorized; the sandbox stays fictional-only too.
-            st.warning('受限真实读取的结果在获得生产写入授权前不能写入任何数据库'
-                       '（包括专用模拟库）；下面只有预览与模拟确认。')
+        if is_production(import_target):
+            write_mode = True
+            st.warning('本入口会实际写入**正式任务库**：写入前先做一致性备份，冲突整批回滚，'
+                       '不会删除、取消或完成未出现在列表里的任务。')
+        elif not fictional:
+            # Real-read data never reaches the sandbox: fictional-only by contract.
+            st.warning('受限真实读取的结果不能写入专用模拟库（沙箱只接受虚构数据）；下面只有预览与模拟确认。')
         else:
             mode = st.radio('运行方式', ('模拟预览（不写库）', '模拟数据库入库'), key='zhs_mode', horizontal=True)
             write_mode = mode == '模拟数据库入库'
             if write_mode:
                 st.warning('本入口会实际写入专用模拟数据库；虚构数据不会写入正式库。')
+    elif not fictional:
+        # The ordinary app: production writes exist but stay closed until the user
+        # authorizes THIS session. Nothing is written by merely rendering this.
+        if st.checkbox('我授权本次写入正式数据库（写入前先备份；冲突整批回滚；'
+                       '不会删除、取消或完成未出现的任务）', key=PREFIX+'prod_authorize'):
+            try:
+                import_target = ProductionImportTarget.open(database_path(), authorized=True)
+                import_target.check()
+                associations_available = source_associations(import_target)
+                write_mode = True
+            except (sqlite3.Error, OSError, ValueError, PermissionError) as error:
+                st.error(f'无法启用正式库写入：{error}')
+                import_target, write_mode = None, False
+        else:
+            st.caption('正式库写入默认关闭：勾选上面的授权后才会出现写入入口。'
+                       '未勾选时只有预览与模拟确认，不写入任何数据库。')
+    production = import_target is not None and is_production(import_target)
     reference = st.radio('对比对象', ('本地任务（只读）', '虚构待办（体验匹配）'), key='zhs_reference', horizontal=True)
     try:
         tasks = (ReadOnlyTaskRepository(path if path is not None else database_path()).list_tasks(include_completed=True)
@@ -322,7 +348,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         st.success('模拟方案已核对。没有写入 SQLite、修改任务或调用 AI。')
     if can_write:
         st.divider()
-        st.subheader('人工确认入库（仅专用模拟库）')
+        st.subheader('人工确认入库（正式数据库）' if production else '人工确认入库（仅专用模拟库）')
         pending = st.session_state.get(PREFIX+'pending')
         if st.session_state.get(PREFIX+'pending_digest') != decision_digest:
             if pending is not None:
@@ -330,12 +356,13 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
             pending = None
             for name in ('pending','pending_digest','save_confirm','partial_confirm'):
                 st.session_state.pop(PREFIX+name,None)
-        if st.button('准备模拟库入库方案',key=PREFIX+'prepare',disabled=not(plan and plan.operations)):
+        if st.button('准备正式库入库方案' if production else '准备模拟库入库方案',
+                     key=PREFIX+'prepare', disabled=not(plan and plan.operations)):
             try:
                 pending = prepare_import(import_target,snapshot,choices,
                     unknown_deadlines=frozenset(unknown_deadlines),associations=chosen_links)
             except (ValueError,sqlite3.Error,OSError,PermissionError):
-                st.error('准备方案失败，请重新核对模拟库与处理选择。')
+                st.error('准备方案失败，请重新核对写入目标与处理选择。')
             else:
                 st.session_state[PREFIX+'pending']=pending
                 st.session_state[PREFIX+'pending_digest']=decision_digest
@@ -344,16 +371,18 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         # A fresh batch gets fresh widget identities. Disabled client widgets can
         # otherwise retain old checkmarks even after server-side state is cleared.
         confirmation_suffix = pending.batch_id if pending else 'none'
-        reviewed = st.checkbox('我已核验选中任务及新增、关联、改期方案，确认写入模拟库',
+        target_name = '正式数据库' if production else '模拟库'
+        reviewed = st.checkbox(f'我已核验选中任务及新增、关联、改期方案，确认写入{target_name}',
                                key=PREFIX+'save_confirm_'+confirmation_suffix,disabled=pending is None)
         partial_ok = (st.checkbox('我理解本次仅导入部分任务，并非完整同步',key=PREFIX+'partial_confirm_'+confirmation_suffix,disabled=pending is None)
                       if not coverage.complete else True)
-        if st.button('确认写入模拟数据库',key=PREFIX+'save',disabled=not(pending and reviewed and partial_ok)):
+        if st.button(f'确认写入{target_name}',key=PREFIX+'save',
+                     disabled=not(pending and reviewed and partial_ok)):
             try:
                 receipt = apply_import(import_target,pending,confirmed=reviewed,partial_confirmed=partial_ok)
                 after = ReadOnlyTaskRepository(import_target.path).list_tasks(include_completed=True)
             except (ValueError,sqlite3.Error,OSError,RuntimeError,PermissionError) as exc:
-                st.error(str(exc) if isinstance(exc,ValueError) else '模拟库写入失败；请核对备份、权限和数据库。')
+                st.error(str(exc) if isinstance(exc,ValueError) else '写入失败；请核对备份、权限和数据库。')
                 for name in ('pending','pending_digest','save_confirm','partial_confirm'):
                     st.session_state.pop(PREFIX+name,None)
             else:
@@ -362,13 +391,20 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
     else:
         st.button('确认入库（正式写入未开放）',disabled=True,key=PREFIX+'production_closed')
         st.caption('正式库写入默认关闭。虚构列表只在独立验收实例可选“模拟数据库入库”；'
-                   '受限真实读取的结果在获得明确生产授权前不能写入任何数据库。预览确认不会转换成真实保存。')
+                   '受限真实读取的结果需要你当次勾选授权后才会出现写入入口。预览确认不会转换成真实保存。')
     last = st.session_state.get('zhs_import_result')
     if import_target and last and last[0]==import_target.database_id:
         _, before, after, receipt = last
-        st.success(f'已写入模拟库：处理 {len(receipt.task_ids)} 项，任务 {len(before)} → {len(after)}。正式库未写入。')
-        st.caption('写入前已做一致性备份；事务包含迁移、任务、来源关联和回执。未知截止仍显示待确认。')
-        for label, rows in (('入库前（模拟库）',before),('入库后 Deadline 看板（模拟库）',after)):
+        if production:
+            st.success(f'已写入正式数据库：处理 {len(receipt.task_ids)} 项，任务 {len(before)} → {len(after)}。')
+            st.caption('写入前已做一致性备份；事务包含扩展迁移、任务、来源关联和幂等回执；'
+                       '未出现的任务未被删除、取消或标记完成。')
+            labels = ('入库前（正式库）','入库后 Deadline 看板（正式库）')
+        else:
+            st.success(f'已写入模拟库：处理 {len(receipt.task_ids)} 项，任务 {len(before)} → {len(after)}。正式库未写入。')
+            st.caption('写入前已做一致性备份；事务包含迁移、任务、来源关联和回执。未知截止仍显示待确认。')
+            labels = ('入库前（模拟库）','入库后 Deadline 看板（模拟库）')
+        for label, rows in zip(labels, (before, after)):
             st.subheader(label)
             st.dataframe([{'编号':t.id,'标题':t.title,'课程':t.category,'截止（北京时间）':format_deadline(t.due_at),
                            '完成状态':'已完成' if t.completed else '未完成','来源':t.source,'版本':t.revision} for t in rows],hide_index=True)

@@ -174,6 +174,60 @@ def test_latest_real_read_can_be_reviewed_in_the_app_page(tmp_path, monkeypatch)
     assert formal.read_bytes() == before
 
 
+def test_production_write_needs_the_authorization_tick_and_then_works(tmp_path, monkeypatch):
+    """The whole MVP loop through the app page, against a temporary FORMAL database."""
+    import json
+
+    from test_zhihuishu_import import real_read_report, tables
+    from test_zhihuishu_import_page import choose, confirmation
+    from pku_deadline_agent.zhihuishu_validation import encode_report
+
+    payload = tmp_path / 'payload.json'
+    payload.write_text(json.dumps(encode_report(real_read_report()), ensure_ascii=False),
+                       encoding='utf-8')
+    monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
+    formal = tmp_path / 'formal.sqlite3'
+    writer = TaskRepository(formal)
+    writer.initialize()
+    kept = writer.add_task('虚构本地待办', '虚构别的课', '作业')
+    before = formal.read_bytes()
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+
+    app = AppTest.from_file(APP, default_timeout=15)
+    app.session_state['page'] = '智慧树任务预览'
+    app.run()
+    # Closed until the user authorizes THIS session: no write entry at all.
+    assert app.button(key='zhs_review_production_closed').disabled
+    assert not any(b.key == 'zhs_review_prepare' for b in app.button)
+    assert formal.read_bytes() == before
+
+    app.checkbox(key='zhs_review_prod_authorize').check().run()
+    assert not app.exception, [e.value for e in app.exception]
+    assert any(b.key == 'zhs_review_prepare' for b in app.button)
+    assert app.button(key='zhs_review_save').disabled       # still needs the confirmations
+    assert formal.read_bytes() == before                    # authorizing writes nothing
+
+    choose(app, 1, '拟新增独立任务')
+    # The sibling title is one character away, so the preview asks for the explicit
+    # "still a separate task" acknowledgement before any plan can be prepared.
+    if any(c.key == 'zhs_review_1_distinct' for c in app.checkbox):
+        app.checkbox(key='zhs_review_1_distinct').check().run()
+    app.button(key='zhs_review_prepare').click().run()
+    confirmation(app, 'save_confirm').check().run()
+    confirmation(app, 'partial_confirm').check().run()
+    assert not app.button(key='zhs_review_save').disabled
+    app.button(key='zhs_review_save').click().run()
+    assert not app.exception, [e.value for e in app.exception]
+
+    after = writer.list_tasks(include_completed=True)
+    written = [t for t in after if t.source == 'zhihuishu']
+    assert len(written) == 1 and written[0].title == '虚构受限任务甲'
+    assert writer.get_task(kept.id).title == '虚构本地待办'          # absent task untouched
+    assert {'zhs_extension', 'zhs_source_links', 'zhs_import_receipts'} <= tables(formal)
+    assert list(formal.parent.glob(formal.name + '.backups/*.sqlite3'))
+    assert any('入库后 Deadline 看板（正式库）' in h.value for h in app.subheader)
+
+
 def test_entering_preview_invalidates_other_page_approvals(setup):
     from types import SimpleNamespace
     app = AppTest.from_file(APP,default_timeout=15)

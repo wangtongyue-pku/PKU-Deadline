@@ -9,10 +9,11 @@ import pytest
 from pku_deadline_agent.database import TaskRepository, TaskChanged
 from pku_deadline_agent.task_management import ImportDecision
 from pku_deadline_agent.zhihuishu_import import (
-    SandboxImportTarget, prepare_import, apply_import, source_associations,
+    ProductionImportTarget, SandboxImportTarget, prepare_import, apply_import, source_associations,
 )
 from pku_deadline_agent.zhihuishu_review import build_review
 from pku_deadline_agent.zhihuishu_samples import sample_review_data
+from test_zhihuishu_validation import real_report
 
 
 @pytest.fixture
@@ -46,6 +47,99 @@ def apply(target,batch):
 def tables(path):
     with sqlite3.connect(path) as c:
         return {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def test_production_target_needs_authorization_and_refuses_sandboxes(tmp_path, monkeypatch):
+    formal = tmp_path / 'formal.sqlite3'
+    TaskRepository(formal).initialize()
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    with pytest.raises(PermissionError):
+        ProductionImportTarget.open(formal)                       # no authorization
+    with pytest.raises(PermissionError):
+        ProductionImportTarget.open(tmp_path / 'missing.sqlite3', authorized=True)
+    sandbox = SandboxImportTarget.create(tmp_path / 'sandbox' / 'tasks.sqlite3')
+    with pytest.raises(PermissionError):
+        ProductionImportTarget.open(sandbox.path, authorized=True)
+
+
+def test_evidence_and_target_must_match(tmp_path, monkeypatch):
+    """Fictional material stays in sandboxes; a real read never enters one."""
+    formal = tmp_path / 'formal.sqlite3'
+    TaskRepository(formal).initialize()
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    production = ProductionImportTarget.open(formal, authorized=True)
+    synthetic, _ = sample_review_data()
+    with pytest.raises(PermissionError):
+        prepare_import(production, build_review(synthetic, ()), {1: ImportDecision('new', allow_distinct=True)})
+    sandbox = SandboxImportTarget.create(tmp_path / 'sandbox' / 'tasks.sqlite3')
+    with pytest.raises(PermissionError):
+        prepare_import(sandbox, build_review(real_report(), ()), {1: ImportDecision('new', allow_distinct=True)})
+
+
+def real_read_report():
+    """A real-evidence report shaped like the whitelisted payload: NO source links."""
+    from datetime import datetime
+
+    from pku_deadline_agent.time_utils import BEIJING
+    from pku_deadline_agent.zhihuishu_reader import ReadTask
+    from pku_deadline_agent.zhihuishu_scroll import ScrollCoverage, ScrollReport
+
+    tasks = (ReadTask('虚构受限任务甲', '虚构受限课程', datetime(2034, 6, 10, 20, tzinfo=BEIJING),
+                      '2034-06-10'),
+             ReadTask('虚构受限任务乙', '虚构受限课程', None, '2034-06-15'))
+    coverage = ScrollCoverage(5, 5, 2, 2, 0, None, False, False, True, False, 'unverified', 3,
+                              ('boundary_unverified', 'fields_incomplete'),
+                              (('deadline_missing', 1),))
+    return ScrollReport(tasks, coverage, '虚构受限课程', 'authorized-real-validation')
+
+
+def test_production_import_backs_up_writes_and_never_deletes(tmp_path, monkeypatch):
+    formal = tmp_path / 'formal.sqlite3'
+    repository = TaskRepository(formal)
+    repository.initialize()
+    kept = repository.add_task('虚构原有任务', '虚构受限课程', '作业', None)
+    other = repository.add_task('虚构另一门课任务', '虚构别的课', '作业', None, source='wechat')
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    target = ProductionImportTarget.open(formal, authorized=True)
+
+    snapshot = build_review(real_read_report(), repository.list_tasks(include_completed=True))
+    batch = prepare_import(target, snapshot, {1: ImportDecision('new', allow_distinct=True)})
+    receipt = apply_import(target, batch, confirmed=True, partial_confirmed=True)
+
+    after = repository.list_tasks(include_completed=True)
+    assert receipt.partial and len(receipt.task_ids) == 1
+    written = repository.get_task(receipt.task_ids[0])
+    assert written.source == 'zhihuishu' and written.title == '虚构受限任务甲'
+    # Absent tasks are never deleted, completed or otherwise touched.
+    assert repository.get_task(kept.id).title == '虚构原有任务'
+    assert repository.get_task(other.id).source == 'wechat'
+    assert len(after) == 3
+    assert {'zhs_extension', 'zhs_source_links', 'zhs_import_receipts'} <= tables(formal)
+    assert list(formal.parent.glob(formal.name + '.backups/*.sqlite3'))
+
+    # The same batch replayed returns its receipt and writes nothing again.
+    again = apply_import(target, batch, confirmed=True, partial_confirmed=True)
+    assert again.already_applied and again.task_ids == receipt.task_ids
+    assert len(repository.list_tasks(include_completed=True)) == 3
+
+
+def test_production_import_rolls_back_when_the_reference_changed(tmp_path, monkeypatch):
+    formal = tmp_path / 'formal.sqlite3'
+    repository = TaskRepository(formal)
+    repository.initialize()
+    existing = repository.add_task('虚构词汇作业', '虚构受限课程', '作业', None)
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    target = ProductionImportTarget.open(formal, authorized=True)
+    snapshot = build_review(real_read_report(), repository.list_tasks(include_completed=True))
+    batch = prepare_import(target, snapshot, {1: ImportDecision('new', allow_distinct=True)})
+    # Someone edits the local database after the plan was prepared.
+    repository.edit_task(existing.id, existing.revision, title='虚构用户改名',
+                         category=existing.category, task_type=existing.task_type,
+                         due_at=existing.due_at, reason='虚构并发修改', confirmed=True)
+    with pytest.raises(TaskChanged):
+        apply_import(target, batch, confirmed=True, partial_confirmed=True)
+    assert repository.get_task(existing.id).title == '虚构用户改名'
+    assert len(repository.list_tasks(include_completed=True)) == 1
 
 
 def test_partial_new_change_unknown_deadline_and_other_sources_preserved(setup):
