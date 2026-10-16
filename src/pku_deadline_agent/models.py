@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 TASK_TYPES = ("作业", "考试", "活动报名", "其他")
-# Every value here is allowed by the tasks.source CHECK constraint; adding one
-# means a schema migration (see database.SCHEMA_VERSION), not just an edit.
-SOURCES = ("manual", "wechat", "teaching_platform", "programming_grid", "email")
+# zhihuishu additionally requires the explicitly enabled extension migration;
+# ordinary initialize() never activates it on an existing user database.
+SOURCES = ("manual", "wechat", "teaching_platform", "programming_grid", "email", "zhihuishu")
 
 
 @dataclass(frozen=True)

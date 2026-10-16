@@ -4,7 +4,7 @@ import sqlite3
 import json
 import re
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -145,7 +145,7 @@ class TaskRepository:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_reminder_state ON reminder_events(state)")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _migrate_source_check(self, connection) -> None:
+    def _migrate_source_check(self, connection, *, include_zhihuishu=False) -> None:
         """v3 -> v4: allow ``email`` as a task source.
 
         The allowed values live in a CHECK constraint, and SQLite cannot alter a
@@ -165,7 +165,9 @@ class TaskRepository:
         ddl = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
-        if ddl is None or "'email'" in (ddl[0] or ""):
+        required = "'zhihuishu'" if include_zhihuishu else "'email'"
+        source_values = _SOURCE_VALUES + (", 'zhihuishu'" if include_zhihuishu else "")
+        if ddl is None or required in (ddl[0] or ""):
             return
         present = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
         columns = ", ".join(name for name in _TASK_COLUMNS if name in present)
@@ -178,7 +180,7 @@ class TaskRepository:
                 category TEXT NOT NULL DEFAULT '' CHECK(length(category) <= 100),
                 task_type TEXT NOT NULL CHECK(task_type IN ('作业', '考试', '活动报名', '其他')),
                 due_at TEXT,
-                source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ({_SOURCE_VALUES})),
+                source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ({source_values})),
                 completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -429,7 +431,7 @@ class TaskRepository:
         return {row["notice_hash"] for row in rows}
 
 
-    def apply_reviewed_tasks(self, candidates, decisions, origins, *, confirmed=False):
+    def apply_reviewed_tasks(self, candidates, decisions, origins, *, confirmed=False, _connection=None):
         """Atomic explicit new/link/update decisions, with optimistic revision checks."""
         if not confirmed:
             raise ValueError("请确认最终保存或更新方案。")
@@ -442,8 +444,13 @@ class TaskRepository:
                 raise ValueError("通知来源无效。")
             if origin.published_at:
                 normalize_datetime(origin.published_at)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        # Internal composition only: the Zhihuishu gateway includes its source
+        # associations and receipt in the SAME outer transaction as these writes.
+        with (self._connect() if _connection is None else nullcontext(_connection)) as connection:
+            if _connection is None:
+                connection.execute("BEGIN IMMEDIATE")
+            elif not connection.in_transaction:
+                raise ValueError("审核写入必须位于已开启的事务中。")
             results, targets = [], set()
             original_ids = {row[0] for row in connection.execute("SELECT id FROM tasks")}
             for item, decision, origin in zip(candidates, decisions, origins):

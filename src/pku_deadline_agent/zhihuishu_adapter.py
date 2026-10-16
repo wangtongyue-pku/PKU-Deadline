@@ -16,7 +16,6 @@ from datetime import date, datetime
 from urllib.parse import unquote, urlsplit
 
 from pku_deadline_agent.database import TaskRepository
-from pku_deadline_agent.models import SOURCES
 from pku_deadline_agent.privacy import scan_privacy
 from pku_deadline_agent.sources import (
     FetchResult, Rejection, SourceAdapter, SourceCapabilities, SourceRecord,
@@ -236,12 +235,12 @@ def decode_zhihuishu_document(raw: bytes) -> dict:
 def plan_zhihuishu(snapshot: ZhihuishuSnapshot, repository):
     """Preview-only reuse of the shared planner. No save path in this stage.
 
-    Schema v4 cannot persist source=zhihuishu or richer metadata. Never route
-    this plan to apply_sync_plan until the reviewed migration is implemented.
+    A source enum does not authorize this normalized offline prototype to write
+    SQLite. The explicit human partial-import gateway is a different contract.
     """
     snapshot.result.require_trustworthy()
-    if isinstance(repository, TaskRepository) and SOURCE not in SOURCES:
-        raise SourceUnsupported("当前 SQLite schema 尚未接入智慧树来源；此阶段只支持离线仓储替身预演。")
+    if isinstance(repository, TaskRepository):
+        raise SourceUnsupported("SQLite 仅允许独立人工审核入口；本规范适配器只支持离线仓储替身预演。")
     entries = {entry.record.source_id: entry for entry in snapshot.entries}
     # Course end is context, not a substitute deadline or an actionable task.
     records = tuple(r for r in snapshot.result.records if entries[r.source_id].kind != "course_end")

@@ -12,6 +12,7 @@ from pku_deadline_agent.zhihuishu_reader import ReadTask, possible_matches
 from pku_deadline_agent.zhihuishu_scroll import ScrollReport
 
 CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
+UNKNOWN_DEADLINE = '截止日期或时刻缺失，不自动补造'
 
 
 def fingerprint(value) -> str:
@@ -48,7 +49,7 @@ def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
         if not task.course or not task.course.strip(): warnings.append('课程绑定不确定')
         if not report.course: warnings.append('读取批次尚未确认课程上下文')
         if report.course and task.course != report.course: warnings.append('课程与读取上下文不一致')
-        if task.deadline is None: warnings.append('截止日期或时刻缺失，不自动补造')
+        if task.deadline is None: warnings.append(UNKNOWN_DEADLINE)
         else: normalize_datetime(task.deadline)
         if task.status not in ('未完成', '已完成'): warnings.append('平台完成状态未知')
         if task.kind != 'homework': warnings.append('当前读取路线仅验证作业，不混用其他时间语义')
@@ -80,7 +81,7 @@ class SimulationPlan:
     simulation_only: bool = True
 
 
-def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision]) -> SimulationPlan:
+def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision], *, unknown_deadlines=frozenset()) -> SimulationPlan:
     """Validate a proposed plan in memory. This type cannot be applied by sync.py."""
     items = {i.index: i for i in snapshot.items}
     local = {t.id: t for t in snapshot.local_tasks}
@@ -90,7 +91,9 @@ def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision
             raise ValueError('预览项或模拟操作无效。')
         if choice.action == 'skip': continue
         item = items[index]
-        if item.category == '信息不足':
+        unknown_new = (item.warnings == (UNKNOWN_DEADLINE,) and choice.action == 'new'
+                       and index in unknown_deadlines)
+        if item.category == '信息不足' and not unknown_new:
             raise ValueError(f'第 {index} 项信息不足，只能查看或暂不处理。')
         target = None
         if choice.action == 'new':
