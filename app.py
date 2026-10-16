@@ -16,6 +16,7 @@ from pku_deadline_agent.time_utils import BEIJING, beijing_now, format_deadline
 from pku_deadline_agent.extraction import ExtractedTask
 from pku_deadline_agent.management_page import render_import_choice, render_task_board, render_reminder_settings
 from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin
+from pku_deadline_agent.zhihuishu_review_page import invalidate_review, render_zhihuishu_preview_page
 
 
 def main() -> None:
@@ -25,7 +26,7 @@ def main() -> None:
 
     with st.sidebar:
         page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入",
-                                 "学校邮箱", "AI 设置", "提醒与备份"), key="page")
+                                 "学校邮箱", "智慧树任务预览", "AI 设置", "提醒与备份"), key="page")
         st.divider()
         with st.expander("这个程序做什么", expanded=False):
             st.write(
@@ -44,6 +45,8 @@ def main() -> None:
             st.write("不要把密码、Cookie、Token 或私人聊天原文填进任务里。")
             st.write("本程序没有登录认证，只监听本机 127.0.0.1，不要暴露到公网。")
 
+    if page != "智慧树任务预览":
+        invalidate_review()
     if page != "Deadline 智能解析" and "parse_session" in st.session_state:
         invalidate_parse()
     if page != "编程网格导入" and "grid_plan" in st.session_state:
@@ -56,6 +59,17 @@ def main() -> None:
         if mail_parse is not None:
             mail_parse.invalidate()
         st.session_state.pop("email_ai_input", None)
+    if page == "智慧树任务预览":
+        # Intentionally before ALL database initialize / migration paths.
+        if "notice_review" in st.session_state:
+            st.session_state["notice_review"].preview = None
+            st.session_state["notice_review"].sent = False
+            st.session_state["notice_confirm"] = False
+            st.session_state.pop("notice_receipt", None)
+        for key in ("_email_rendered", "email_plan", "email_rendered_plan", "email_generation"):
+            st.session_state.pop(key, None)
+        render_zhihuishu_preview_page()
+        return
     if page == "Deadline 智能解析":
         if "notice_review" in st.session_state:
             st.session_state["notice_review"].preview = None

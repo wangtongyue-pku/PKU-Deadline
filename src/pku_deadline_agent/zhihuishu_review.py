@@ -1,0 +1,116 @@
+"""Local comparison and simulated decisions; no database writer or AI client."""
+
+from dataclasses import dataclass, field, asdict
+import hashlib
+import json
+
+from pku_deadline_agent.extraction import ExtractedTask
+from pku_deadline_agent.models import Task
+from pku_deadline_agent.task_management import ImportDecision, MatchSuggestion, find_matches, identity
+from pku_deadline_agent.time_utils import normalize_datetime
+from pku_deadline_agent.zhihuishu_reader import ReadTask, possible_matches
+from pku_deadline_agent.zhihuishu_scroll import ScrollReport
+
+CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
+
+
+def fingerprint(value) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    default=str).encode('utf-8')).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReviewItem:
+    index: int  # This preview only; never a platform/source ID.
+    task: ReadTask = field(repr=False)
+    category: str
+    matches: tuple[MatchSuggestion, ...] = field(repr=False)
+    warnings: tuple[str, ...]
+    batch_peers: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewSnapshot:
+    report: ScrollReport = field(repr=False)
+    items: tuple[ReviewItem, ...] = field(repr=False)
+    local_tasks: tuple[Task, ...] = field(repr=False)
+    digest: str = field(repr=False)
+
+
+def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
+    if len(report.tasks) > 20:
+        raise ValueError('预览累计最多 20 条任务。')
+    local = tuple(t for t in tasks if t.deleted_at is None)
+    items = []
+    for index, task in enumerate(report.tasks):
+        warnings = []
+        if not task.title.strip(): warnings.append('任务名称缺失')
+        if not task.course or not task.course.strip(): warnings.append('课程绑定不确定')
+        if not report.course: warnings.append('读取批次尚未确认课程上下文')
+        if report.course and task.course != report.course: warnings.append('课程与读取上下文不一致')
+        if task.deadline is None: warnings.append('截止日期或时刻缺失，不自动补造')
+        else: normalize_datetime(task.deadline)
+        if task.status not in ('未完成', '已完成'): warnings.append('平台完成状态未知')
+        if task.kind != 'homework': warnings.append('当前读取路线仅验证作业，不混用其他时间语义')
+        candidate = ExtractedTask(index+1, task.title, task.course or '', '作业',
+                                  None, task.deadline, False, ())
+        matches = find_matches(candidate, list(local), {}) if task.title.strip() else ()
+        peers = tuple(i+1 for i in possible_matches(task, report.tasks) if i != index)
+        category = ('信息不足' if warnings else
+                    '疑似截止时间变更' if any(m.kind == 'deadline_change' for m in matches) else
+                    '可能重复' if matches or peers else '待新增')
+        items.append(ReviewItem(index+1, task, category, matches, tuple(warnings), peers))
+    digest = fingerprint({'report': asdict(report), 'local': [asdict(t) for t in local]})
+    return ReviewSnapshot(report, tuple(items), local, digest)
+
+
+@dataclass(frozen=True)
+class SimulatedOperation:
+    index: int
+    action: str
+    target: Task | None = field(repr=False)
+    incoming: ReadTask = field(repr=False)
+    reason: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SimulationPlan:
+    operations: tuple[SimulatedOperation, ...] = field(repr=False)
+    list_complete: bool
+    simulation_only: bool = True
+
+
+def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision]) -> SimulationPlan:
+    """Validate a proposed plan in memory. This type cannot be applied by sync.py."""
+    items = {i.index: i for i in snapshot.items}
+    local = {t.id: t for t in snapshot.local_tasks}
+    operations, targets = [], set()
+    for index, choice in choices.items():
+        if index not in items or choice.action not in ('new', 'link', 'update', 'skip'):
+            raise ValueError('预览项或模拟操作无效。')
+        if choice.action == 'skip': continue
+        item = items[index]
+        if item.category == '信息不足':
+            raise ValueError(f'第 {index} 项信息不足，只能查看或暂不处理。')
+        target = None
+        if choice.action == 'new':
+            if choice.target_id is not None:
+                raise ValueError('拟新增不能同时关联本地目标。')
+            if (item.matches or item.batch_peers) and not choice.allow_distinct:
+                raise ValueError('可能重复的独立新增须明确选择仍作为不同任务。')
+        else:
+            target = local.get(choice.target_id)
+            if target is None or target.revision != choice.expected_revision:
+                raise ValueError('未选择有效目标，或目标版本已变化，请重新核对。')
+            if identity(target.category) != identity(item.task.course or '') or target.task_type != '作业':
+                raise ValueError('课程或类型不一致，不能拟关联或改期；请先核对来源信息。')
+            if target.id in targets:
+                raise ValueError('多条候选指向同一本地任务，须先解决匹配冲突。')
+            targets.add(target.id)
+            if choice.action == 'update':
+                if target.due_at == item.task.deadline:
+                    raise ValueError('截止相同，无需拟修改，可选择拟关联。')
+                if not choice.reason.strip():
+                    raise ValueError('拟修改截止时间必须填写原因。')
+        operations.append(SimulatedOperation(index, choice.action, target, item.task, choice.reason.strip()))
+    return SimulationPlan(tuple(operations), snapshot.report.coverage.complete)

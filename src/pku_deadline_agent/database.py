@@ -41,6 +41,36 @@ def _identity(value: str) -> str:
     return re.sub(r"[\W_]", "", value.casefold())
 
 
+class ReadOnlyTaskRepository:
+    """Preview-only access: no initialization, migration or mutation methods.
+
+    Reuse the existing task query/conversion through a connection SQLite itself
+    opens read-only. Do not use immutable=1: committed WAL data must be visible.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute('PRAGMA query_only=ON')
+            if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
+                raise RuntimeError('预览只接受当前版本数据库，不自动初始化或迁移。')
+            yield connection
+        finally:
+            connection.close()
+
+    def list_tasks(self, include_completed=False, *, include_deleted=False) -> list[Task]:
+        return TaskRepository.list_tasks(self, include_completed, include_deleted=include_deleted)
+
+    @staticmethod
+    def _to_task(row):
+        return TaskRepository._to_task(row)
+
+
 class TaskRepository:
     def __init__(self, path: str | Path):
         self.path = Path(path)
