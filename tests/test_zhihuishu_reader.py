@@ -14,7 +14,7 @@ from pku_deadline_agent.sources import SourceUnverified
 from pku_deadline_agent.time_utils import BEIJING
 from pku_deadline_agent.zhihuishu_reader import (
     BoundedTaskListReader, ListProfile, ReaderError, ReaderLimitExceeded,
-    possible_matches,
+    FLIPPED_HOMEWORK_LIST_PATH, FLIPPED_HOMEWORK_VALIDATION_PROFILE, possible_matches, summarize_validation,
 )
 
 HTML = Path(__file__).with_name('fixtures').joinpath('zhihuishu_task_list.html').read_text(encoding='utf-8')
@@ -393,3 +393,122 @@ def test_inconsistent_total_cannot_hide_known_unread_cards(page):
     assert result.coverage.unread_minimum == 1
     assert 'total_count_conflict' in [i.code for i in result.issues]
     assert not result.coverage.view_complete
+
+
+class SimulatedPlatformPage:
+    """Pretend URL for guard tests; evaluate ONLY on our offline about:blank page."""
+    url = 'https://wenda.zhihuishu.com/course/aaaa'
+
+    def __init__(self, page):
+        self.page = page
+
+    def evaluate(self, expression, arg):
+        return self.page.evaluate(expression, arg)
+
+
+@pytest.fixture
+def observed_layout(page):
+    fictional = Path(__file__).with_name('fixtures').joinpath('zhihuishu_observed_layout.html')
+    page.set_content(fictional.read_text(encoding='utf-8'))
+    return SimulatedPlatformPage(page)
+
+
+def test_observed_layout_partial_fields_are_not_promoted_to_complete(observed_layout):
+    reader = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE)
+    reports = tuple(reader.read(observed_layout, allow_real=True, validation_only=True) for _ in range(3))
+    report = reports[0]
+    assert [t.title for t in report.tasks] == ['虚构任务甲', '虚构任务乙', '虚构任务丙']
+    assert [t.deadline.month if t.deadline else None for t in report.tasks] == [6, 7, None]
+    assert all(t.course is None and t.observed_task_id is None and t.source_url is None for t in report.tasks)
+    summary = summarize_validation(reports)
+    assert summary['loaded_count'] == 5 and summary['visible_count'] == 3
+    assert summary['known_deadline_count'] == 2 and summary['unknown_deadline_count'] == 1
+    assert summary['course_bound_count'] == 0 and summary['pending_status_count'] == 3
+    assert summary['same_view_fields_equal'] and summary['coverage_equal']
+    assert summary['id_stability'] == 'not_evaluable_no_id'
+    assert summary['unread_minimum'] == summary['outside_view_count'] == 2
+    assert summary['displayed_total'] is None
+    assert summary['pagination_has_next'] is None
+    assert summary['lazy_loading_assessment'] == summary['virtual_scroll_assessment'] == 'unverified'
+    assert not summary['view_complete'] and not summary['ready_for_sync']
+
+
+def test_validation_profile_still_refuses_default_production_read(observed_layout):
+    with pytest.raises(PermissionError):
+        BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE).read(observed_layout, allow_real=True)
+    assert not FLIPPED_HOMEWORK_VALIDATION_PROFILE.real_verified
+
+
+def test_validation_mode_still_requires_separate_real_authorization(observed_layout):
+    with pytest.raises(PermissionError):
+        BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE).read(observed_layout, validation_only=True)
+
+
+def test_validation_mode_never_claims_complete_even_when_counter_matches(page):
+    result = BoundedTaskListReader(PROFILE).read(SimulatedPlatformPage(page), allow_real=True, validation_only=True)
+    assert result.fields_valid
+    assert not result.coverage.view_complete and 'layout_validation_only' in result.coverage.unread_scope
+    assert not result.confirmed_empty and not result.ready_for_sync
+
+
+def test_visible_course_name_is_used_without_course_code_fallback(observed_layout):
+    observed_layout.page.eval_on_selector('.course-name > .name', "e=>{e.style.position='static'}")
+    report = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE).read(observed_layout, allow_real=True, validation_only=True)
+    assert all(t.course == '虚构课程丙' for t in report.tasks)
+    assert not report.coverage.view_complete
+
+
+def test_first_date_span_does_not_consume_late_submission_hint(observed_layout):
+    observed_layout.page.eval_on_selector_all('.homework-item', 'es=>{for(const e of es)e.style.position="static"}')
+    report = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE).read(observed_layout, allow_real=True, validation_only=True)
+    assert all(t.deadline is not None for t in report.tasks)
+    assert not any(i.code == 'invalid_task_field' for i in report.issues)
+
+
+def test_validation_summary_contains_no_private_values(page):
+    report = read(page)
+    import json
+    text = json.dumps(summarize_validation((report, report)), ensure_ascii=False)
+    for value in ('虚构作业甲', '虚构课程甲', '2031', 'a'*32, '1'*32, '/homework/1111'):
+        assert value not in text
+    assert 'unverified_same_view_only' in text
+
+
+@pytest.mark.parametrize('value', ['yes', 1, None])
+def test_validation_mode_is_explicit_boolean(value):
+    with pytest.raises(ValueError):
+        BoundedTaskListReader(PROFILE).read(StubPage(), validation_only=value)
+
+
+@pytest.mark.parametrize('reports', [(), (None,)*4])
+def test_validation_summary_rejects_invalid_number_of_reads(reports):
+    with pytest.raises(ValueError):
+        summarize_validation(reports)
+
+
+def test_observed_list_route_is_allowed_only_in_explicit_validation_mode(observed_layout):
+    observed_layout.url = 'https://wenda.zhihuishu.com' + FLIPPED_HOMEWORK_LIST_PATH
+    reader = BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE)
+    with pytest.raises(PermissionError):
+        reader.read(observed_layout, allow_real=True)
+    result = reader.read(observed_layout, allow_real=True, validation_only=True)
+    assert len(result.tasks) == 3 and not result.coverage.view_complete
+
+
+@pytest.mark.parametrize('path', [
+    '/stu/courseInfo/homeworkExam/start', '/stu/courseInfo/homeworkExam/answer',
+    '/stu/courseInfo/exam/', '/stu/other/homeworkExam/',
+    '/stu/courseInfo/HomeworkExam/', '/stu/courseInfo/homeworkExam%2F',
+])
+def test_list_route_exception_does_not_allow_other_exam_routes(path):
+    page = StubPage(url='https://wenda.zhihuishu.com' + path)
+    with pytest.raises(PermissionError):
+        BoundedTaskListReader(FLIPPED_HOMEWORK_VALIDATION_PROFILE).read(page, allow_real=True, validation_only=True)
+    assert page.calls == 0
+
+
+def test_synthetic_validation_mode_also_cannot_claim_complete(page):
+    result = BoundedTaskListReader(PROFILE).read(page, validation_only=True)
+    assert result.verification == 'synthetic-validation'
+    assert result.fields_valid and not result.coverage.view_complete
+    assert not result.confirmed_empty and not result.ready_for_sync

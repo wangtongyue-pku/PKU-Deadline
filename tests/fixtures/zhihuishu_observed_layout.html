@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>虚构任务列表结构回归</title>
+<!-- Classes/relative field layout are from authorized structural observation.
+     ALL text, dates, positions, sizes and course code here are invented.
+     Not a captured page, no real names, task IDs, URLs, or course content. -->
+<style>
+body { margin: 8px; font: 14px sans-serif; }
+.banner { height: 55px; }
+.course-name > .name { position: absolute; top: -80px; width: 200px; height: 30px; }
+.code { display: block; }
+.homework-content { position: relative; height: 1900px; width: 800px; }
+.homework-item { position: absolute; width: 750px; height: 280px; border: 1px solid #ccc; }
+.title-wrapper { position: absolute; top: 0; height: 32px; }
+.homework-item-time { position: absolute; top: 260px; }
+.comment { margin-left: 25px; }
+.btn-state { display: none; }
+.btn { display: inline-block; }
+</style>
+<div class="qa-list-wrapper">
+  <div class="banner"><div class="course-info"><div class="course-name">
+    <span class="name">虚构课程丙</span>
+    <span class="code"><span class="fm">虚构课码 AAAA</span><i></i></span>
+  </div></div></div>
+  <div class="content clearfix"><div class="work-exam"><div class="content">
+    <div class="ant-tabs">
+      <div class="ant-tabs-tab" aria-selected="true">作业</div>
+      <div class="ant-tabs-tab" aria-selected="false">考试</div>
+      <div class="ant-tabs-content"><div class="ant-tabs-tabpane-active">
+        <div class="state-tabs"><span class="menu-pane">全部</span><span class="menu-pane active">未完成</span><span class="menu-pane">已完成</span></div>
+        <div class="homework-content">
+          <div class="homework-item" style="top:0">
+            <div class="title-wrapper"><span class="tit">虚构任务甲</span><div class="btn-wrapper"><span class="btn-state"></span><div class="btn do">开始做题</div></div></div>
+            <p class="homework-item-desc">虚构摘要一</p>
+            <div class="homework-item-time"><span>截止时间：2032.06.18 21:00</span><span class="comment">0条评论</span></div>
+          </div>
+          <div class="homework-item" style="top:300px">
+            <div class="title-wrapper"><span class="tit">虚构任务乙</span><div class="btn-wrapper"><span class="btn-state"></span><div class="btn do">开始做题</div></div></div>
+            <p class="homework-item-desc">虚构摘要二</p>
+            <div class="homework-item-time"><span>截止时间：2032.07.03 00:00</span><span class="comment">0条评论</span></div>
+          </div>
+          <div class="homework-item" style="top:700px">
+            <div class="title-wrapper"><span class="tit">虚构任务丙</span><div class="btn-wrapper"><span class="btn-state"></span><div class="btn do">开始做题</div></div></div>
+            <p class="homework-item-desc">虚构摘要三</p>
+            <div class="homework-item-time"><span class="delay">截止时间：2032.08.01 18:00</span><span class="late-down">虚构迟交提示</span><span class="comment">0条评论</span></div>
+          </div>
+          <div class="homework-item" style="top:1100px"><div class="title-wrapper"><span class="tit">虚构任务丁</span></div><div class="homework-item-time"><span>截止时间：2032.09.01 18:00</span></div></div>
+          <div class="homework-item" style="top:1500px"><div class="title-wrapper"><span class="tit">虚构任务戊</span></div><div class="homework-item-time"><span>截止时间：2032.10.01 18:00</span></div></div>
+        </div>
+      </div></div>
+    </div>
+  </div></div></div>
+</div>

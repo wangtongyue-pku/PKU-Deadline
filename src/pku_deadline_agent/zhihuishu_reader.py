@@ -22,6 +22,9 @@ from pku_deadline_agent.zhihuishu_dom import SNAPSHOT_SCRIPT
 
 MAX_VISIBLE_TASKS = 20
 REAL_HOST = 'wenda.zhihuishu.com'
+# Public, static list route observed under explicit authorization; no query IDs.
+# Only validation mode may use it until a full production profile is verified.
+FLIPPED_HOMEWORK_LIST_PATH = '/stu/courseInfo/homeworkExam/'
 
 
 class ReaderError(SessionLayoutChanged):
@@ -117,7 +120,7 @@ class ReadReport:
     tasks: tuple[ReadTask, ...] = field(repr=False)
     coverage: Coverage
     issues: tuple[ReadIssue, ...]
-    verification: str  # 'synthetic' or 'authorized-real-profile'; not model output.
+    verification: str  # synthetic[-validation] / authorized-real-{profile,validation}
 
     @property
     def fields_valid(self) -> bool:
@@ -239,6 +242,10 @@ def _normalize(snapshot: dict, *, base: str, verification: str) -> ReadReport:
     if snapshot['empty'] and counts['loaded']:
         issues.append(ReadIssue('empty_state_conflict'))
     scope: list[str] = []
+    if verification in ('authorized-real-validation', 'synthetic-validation'):
+        # Partial selector research is not a verified production layout, even if
+        # an unverified counter happens to equal the number of observed cards.
+        scope.append('layout_validation_only')
     if counts['outside_view']:
         scope.append('loaded_outside_view')
     if total is None:
@@ -271,25 +278,37 @@ class BoundedTaskListReader:
             raise ValueError('可见任务上限必须为 1–20。')
         self.profile, self.limit = profile, limit
 
-    def read(self, page: ReadablePage, *, allow_real: bool = False) -> ReadReport:
+    def read(self, page: ReadablePage, *, allow_real: bool = False,
+             validation_only: bool = False) -> ReadReport:
+        """Explicit validation mode permits an incomplete, observed profile.
+
+        This is only for a separately authorized inspection, NOT a production
+        fallback. All URL/privacy/viewport/count/concurrency gates remain active;
+        validation results can never claim a complete view or confirmed empty.
+        Default real reads still require a fully verified profile.
+        """
+        if type(validation_only) is not bool:
+            raise ValueError('验证模式必须显式传入布尔值。')
         url = page.url
         if url == 'about:blank':
-            verification = 'synthetic'
+            verification = 'synthetic-validation' if validation_only else 'synthetic'
             base = f'https://{REAL_HOST}/'
         else:
             try:
                 parts = urlsplit(url)
                 safe = (parts.scheme == 'https' and parts.hostname == REAL_HOST
                         and not parts.username and not parts.password and parts.port in (None, 443)
-                        and not re.search(r'exam|paper|answer|submit|video|learn|login|auth',
-                                          unquote(parts.path), re.I))
+                        and (not re.search(r'exam|paper|answer|submit|video|learn|login|auth',
+                                           unquote(parts.path), re.I)
+                             or (validation_only and parts.path == FLIPPED_HOMEWORK_LIST_PATH)))
             except ValueError:
                 safe = False
             if not safe or allow_real is not True:
                 raise PermissionError('未授权的页面或真实读取；未读取任务字段。')
-            if not self.profile.real_verified:
+            if not self.profile.real_verified and not validation_only:
                 raise PermissionError('字段 / 课程 / 完整性配置仅经模拟验证，不能用于真实页面。')
-            verification, base = 'authorized-real-profile', url
+            verification = 'authorized-real-validation' if validation_only else 'authorized-real-profile'
+            base = url
         params = asdict(self.profile) | {'limit': self.limit}
         observations = []
         for _ in range(2):
@@ -332,3 +351,55 @@ def possible_matches(task: ReadTask, previous: tuple[ReadTask, ...]) -> tuple[in
     return tuple(i for i, old in enumerate(previous)
                  if normalized(task.course) == normalized(old.course)
                  and normalized(task.title) == normalized(old.title) and task.kind == old.kind)
+
+
+# Observed under the 2026-10-16 limited real-page authorization. Missing counters,
+# IDs and offscreen course names are deliberately not inferred. This is NOT a
+# fully verified profile: use only with separately authorized validation_only.
+FLIPPED_HOMEWORK_VALIDATION_PROFILE = ListProfile(
+    title='.title-wrapper > .tit',
+    course_scope='.qa-list-wrapper',
+    course='.banner .course-info .course-name > .name',
+    deadline='.homework-item-time > span:first-child',
+    link='a[href]',
+)
+
+
+def summarize_validation(reports: tuple[ReadReport, ...]) -> dict:
+    """Safe aggregate output only; raw titles/courses/times/IDs never leave memory.
+
+    Equality across this same viewport is short-term consistency, NOT evidence
+    for identity stability across reloads, different courses or enrollment terms.
+    """
+    if not reports or len(reports) > 3:
+        raise ValueError('验证摘要需要 1–3 次有界读取。')
+    first = reports[0]
+    known_times = sum(t.deadline is not None for t in first.tasks)
+    available_ids = sum(t.observed_task_id is not None for t in first.tasks)
+    return {
+        'readings': len(reports),
+        'same_view_fields_equal': all(r.tasks == first.tasks for r in reports[1:]),
+        'coverage_equal': all(r.coverage == first.coverage for r in reports[1:]),
+        'loaded_count': first.coverage.loaded_count,
+        'visible_count': first.coverage.visible_count,
+        'read_count': first.coverage.read_count,
+        'title_count': len(first.tasks),
+        'course_bound_count': sum(t.course is not None for t in first.tasks),
+        'known_deadline_count': known_times,
+        'unknown_deadline_count': len(first.tasks) - known_times,
+        'pending_status_count': sum(t.status == '未完成' for t in first.tasks),
+        'source_link_count': sum(t.source_url is not None for t in first.tasks),
+        'available_task_id_count': available_ids,
+        'id_stability': 'unverified_same_view_only' if available_ids else 'not_evaluable_no_id',
+        'displayed_total': first.coverage.displayed_total,
+        'pagination_has_next': first.coverage.has_next,
+        'lazy_loading_assessment': 'observed' if first.coverage.lazy else 'unverified',
+        'virtual_scroll_assessment': 'observed' if first.coverage.virtual else 'unverified',
+        'outside_view_count': first.coverage.outside_view_count,
+        'unread_minimum': first.coverage.unread_minimum,
+        'unread_scope': first.coverage.unread_scope,
+        'view_complete': first.coverage.view_complete,
+        'ready_for_sync': False,
+        'verification': first.verification,
+        'issues': tuple({'code': i.code, 'position': i.position} for i in first.issues),
+    }
