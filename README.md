@@ -2,9 +2,9 @@
 
 > **本项目由 AI 编写。** 代码、测试和文档都是在 AI 编程助手（Claude / Codex / DeepSeek Harness）的协助下生成的，人类负责提出需求、审核结果并在真实环境里验证。功能已在自己的账号上跑通，但**请自行判断是否可信**，重要数据务必保留备份。
 
-本地优先的学业 Deadline 助手。任务保存在本机 SQLite；编程网格和学校邮箱只读同步。邮箱可每天自动更新本地看板，AI 提取仅在查看脱敏预览并点击发送后调用 DeepSeek / MiMo。
+本地优先的学业 Deadline 助手。任务保存在本机 SQLite；**编程网格和学校邮箱只读同步，智慧树与问学阅堂在应用内只读读取后由你人工确认入库**。邮箱可每天自动更新本地看板，AI 提取仅在查看脱敏预览并点击发送后调用 DeepSeek / MiMo。
 
-主要用途：把**编程网格的题集和截止时间**同步进来，加上手动录入和微信通知，统一成一份能提醒你的待办列表。
+主要用途：把**编程网格的题集、学校邮箱里的截止、智慧树和问学阅堂的作业列表**收进同一份待办，加上手动录入和微信通知，统一成一份能提醒你的列表。
 
 如果你也在用北大编程网格并受 Deadline 困扰，欢迎取用或参考；但请注意下面的**已知限制**，尤其是「拿不到完成状态」这一条。
 
@@ -278,6 +278,8 @@ $env:PKU_BROWSER_CHANNEL = 'msedge'   # 可选值：chrome / msedge
 ## 已知限制
 
 - **拿不到完成状态**：编程网格的课程页响应里没有提交 / 通过 / 得分字段，所以导入的任务状态一律「未知」，**不会自动标记完成**，需要你自己勾。
+- **智慧树 / 问学阅堂是「部分读取」**：没有稳定的平台任务 ID，也没有已核实的总数与列表末端，因此只保证「读到的这些」，**不推断没读到的作业已完成或已删除**；缺字段的任务请在审核页**手动补充**。平台完成状态可能读不出，需你自己在本地待办里管理。
+- **首次真实入库由你亲自确认**：勾选当次授权、核对方案、点最终写入，助手不代操作。
 - **一次一门课**：响应是单课程级的，有几门课就同步几次。
 - **编程网格每日定时同步没做**：目前只能手动点。邮箱每天检查独立实现，方案见 [同步方案评估](docs/stage6_sync_plan.md)。
 - **提醒依赖桌面会话**：关机、休眠、未登录桌面时不会弹窗，也不保证你看到了。
@@ -390,8 +392,15 @@ src/pku_deadline_agent/
   email_schedule.py          Windows 每日邮箱检查任务
   api_key_store.py            API Key 解析与 Windows 凭据管理器存储
   ai_settings_page.py         AI 设置页面（保存 / 删除 Key）
-docs/                         可行性报告、同步方案与研究记录
-tests/                        890 项离线测试
+  zhihuishu_adapter.py / zhihuishu_reader.py / zhihuishu_dom.py   智慧树离线契约与有界只读读取
+  zhihuishu_display.py / zhihuishu_scroll.py   平台日期格式与有限滚动
+  zhihuishu_review.py / zhihuishu_review_page.py / zhihuishu_samples.py   审核页与差异匹配
+  zhihuishu_session.py / zhihuishu_browser.py / zhihuishu_browser_page.py   读取范围、进程桥接与状态轮询
+  zhihuishu_import.py / zhihuishu_validation.py   人工确认入库契约与白名单载荷
+  yuetang_reader.py / yuetang_status.py / yuetang_validation.py   问学阅堂只读读取、提交状态与载荷
+  review_platforms.py         来源 / SQL 标识白名单（智慧树与问学阅堂隔离）
+docs/                         可行性报告、同步方案、平台使用与研究记录
+tests/                        1281 项离线测试
 AGENTS.md                     开发约定（改代码前先读）
 HANDOFF.md                    进度与交接记录
 ```
