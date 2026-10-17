@@ -24,7 +24,6 @@ from pku_deadline_agent.zhihuishu_review import (
     origin_label,
     simulate_choices,
 )
-from pku_deadline_agent.zhihuishu_samples import sample_review_data
 from pku_deadline_agent.zhihuishu_import import (
     ProductionImportTarget,
     apply_import,
@@ -95,21 +94,24 @@ def _manual_deadline(text):
     return parsed, None
 
 
-def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None):
+def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None, development=False):
     st.subheader('智慧树任务预览')
-    if report is None and import_target is None:
+    if not development and report is None and import_target is None:
         from pku_deadline_agent.zhihuishu_browser_page import render_browser_read
         render_browser_read()
-    sample, example_tasks = sample_review_data()
-    if report is None:
-        # Real reads land here by default; the fictional samples stay the fallback
-        # and the explicit alternative, so nothing silently pretends to be real.
-        latest = load_latest()
-        if latest is not None:
-            source = st.radio('数据来源', ('最近一次真实读取', '开发样例（虚构）'),
-                              key=PREFIX+'source', horizontal=True)
-            report = latest if source == '最近一次真实读取' else None
-    report = report if report is not None else sample
+    example_tasks = ()
+    if development:
+        # Explicit developer scripts/tests only; never read the user's payload.
+        from pku_deadline_agent.zhihuishu_samples import sample_review_data
+        sample, example_tasks = sample_review_data()
+        report = report if report is not None else sample
+    else:
+        report = report if report is not None else load_latest()
+        if report is None:
+            invalidate_review()
+            st.info('还没有可用的智慧树读取结果。请点击上方“读取智慧树”，登录并打开作业未完成列表。')
+            return
+        st.caption('数据来源：最近一次真实读取 · 对比当前本地任务')
     raw_digest = fingerprint(asdict(report))
     if st.session_state.get('zhs_input_digest') != raw_digest:
         # Corrections and permission belong to ONE raw read, not another course,
@@ -133,16 +135,21 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
         invalidate_review()
         st.error('读取结果缺少可辨认的来源标记，拒绝进入预览；请重新通过有界读取器获取。')
         return
+    if fictional and not development:
+        invalidate_review()
+        st.error('正式页面只接受真实读取结果，请重新读取智慧树列表。')
+        return
+    if not development and import_target is not None and not is_production(import_target):
+        invalidate_review()
+        st.error('正式页面不能使用开发数据库。')
+        return
     if fictional:
         st.info('开发预览：智慧树列表使用虚构数据。所有选择和确认仅模拟，不保存任务，不连接智慧树或 AI。'
                 if import_target is None else
                 '列表与专用库均为虚构数据。默认预览不写库；另选“模拟数据库入库”并确认后才写入虚构库。正式写入未开放，不连接智慧树或 AI。')
     else:
-        # A real authorized read: preview and simulated matching only. Nothing is
-        # written anywhere, and no further site access happens on this page.
         st.info(f'数据来源：{origin}，来自一次获你单独授权的有界读取。'
-                '此处只做本地预览与模拟匹配：不再访问智慧树，不调用 AI，'
-                '在生产写入获得明确授权前不写入任何数据库（包括专用模拟库）。')
+                '在本地核对任务，不再访问智慧树或调用 AI；确认写入前不会修改任务库。')
     write_mode = False
     associations_available = ()
     if import_target is not None:
@@ -183,16 +190,18 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                 import_target, write_mode = None, False
         else:
             st.caption('正式库写入默认关闭：勾选上面的授权后才会出现写入入口。'
-                       '未勾选时只有预览与模拟确认，不写入任何数据库。')
+                       '未勾选时只有预览，不写入任务库。')
     production = import_target is not None and is_production(import_target)
-    reference = st.radio('对比对象', ('本地任务（只读）', '虚构待办（体验匹配）'), key='zhs_reference', horizontal=True)
+    reference = (st.radio('对比对象', ('本地任务（只读）', '虚构待办（体验匹配）'),
+                          key='zhs_reference', horizontal=True) if development else '本地任务（只读）')
     try:
         tasks = (ReadOnlyTaskRepository(path if path is not None else database_path()).list_tasks(include_completed=True)
                  if reference == '本地任务（只读）' else example_tasks)
         snapshot = build_review(report, tasks)
     except (sqlite3.Error, OSError, RuntimeError, ValueError):
         invalidate_review()
-        st.error('无法只读读取或核验任务库；未将失败当成空库，也不会创建或迁移数据库。可切换虚构待办体验。')
+        st.error('无法只读读取或核验任务库；未将失败当成空库，也不会创建或迁移数据库。'
+                 + ('可切换虚构待办体验。' if development else '请检查本地数据库路径和版本。'))
         return
     can_write = write_mode and reference == '本地任务（只读）'
     digest = fingerprint((snapshot.digest, reference, write_mode))
@@ -212,7 +221,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
     st.caption('本地任务包含已完成项，排除回收站；平台状态不会改动本地完成状态。当前对比只使用任务字段，不读取通知正文。')
     coverage = report.coverage
     if coverage.complete:
-        st.success(f'{origin}：范围和字段已验证完整；仍然只供预览与模拟，不写任何数据库。')
+        st.success(f'{origin}：范围和字段已验证完整；保存前请核对选中任务。')
     else:
         # The explicit marker the user asked for: a partial read is a first-class
         # state, never silently presented as a full list.
@@ -352,8 +361,8 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                        '原截止': format_deadline(op.target.due_at) if op.target else '无',
                        '拟截止': format_deadline(op.target.due_at if op.action == 'link' else op.incoming.deadline),
                        '原因': op.reason or '人工预览选择'} for op in plan.operations], hide_index=True)
-    else: st.caption('勾选候选并明确选择处理方式后，这里会列出模拟操作。')
-    if not production:
+    else: st.caption('勾选候选并选择处理方式后，这里会列出拟执行操作。')
+    if development and not production:
         st.caption('确认只检查当前方案，不代表已入库；修改选择、匹配、原因、数据或离开页面都会撤销模拟确认。')
         if st.button('确认模拟方案（不会保存）', key=PREFIX+'confirm', disabled=not (plan and plan.operations)):
             st.session_state[PREFIX+'confirmed'] = decision_digest
@@ -402,9 +411,9 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                 st.session_state['zhs_import_result']=(import_target.database_id,tuple(snapshot.local_tasks),tuple(after),receipt)
                 st.rerun()
     else:
-        st.button('确认入库（正式写入未开放）',disabled=True,key=PREFIX+'production_closed')
-        st.caption('正式库写入默认关闭。虚构列表只在独立验收实例可选“模拟数据库入库”；'
-                   '受限真实读取的结果需要你当次勾选授权后才会出现写入入口。预览确认不会转换成真实保存。')
+        st.button('确认入库（正式写入未开放）' if development else '请先勾选本次写入授权',
+                  disabled=True,key=PREFIX+'production_closed')
+        st.caption('正式库写入默认关闭，需要你当次勾选授权后才出现准备与确认入口。')
     last = st.session_state.get('zhs_import_result')
     if import_target and last and last[0]==import_target.database_id:
         _, before, after, receipt = last

@@ -24,8 +24,18 @@ def setup(tmp_path,monkeypatch):
     return path,repo
 
 
-def open_page():
-    app = AppTest.from_file(APP,default_timeout=15)
+DEV_SCRIPT = '''import streamlit as st
+from pku_deadline_agent.zhihuishu_review_page import render_zhihuishu_preview_page, invalidate_review
+if st.session_state.get('page', '智慧树任务预览') == '智慧树任务预览':
+    render_zhihuishu_preview_page(development=True)
+else:
+    invalidate_review()
+'''
+
+
+def open_page(*, production=False):
+    app = (AppTest.from_file(APP,default_timeout=15) if production
+           else AppTest.from_string(DEV_SCRIPT,default_timeout=15))
     app.session_state['page']='智慧树任务预览'
     return app.run()
 
@@ -158,7 +168,9 @@ def test_latest_real_read_can_be_reviewed_in_the_app_page(tmp_path, monkeypatch)
     app.session_state['page'] = '智慧树任务预览'
     app.run()
     assert not app.exception, [e.value for e in app.exception]
-    assert app.radio(key='zhs_review_source').value == '最近一次真实读取'
+    assert not any(r.key in ('zhs_review_source', 'zhs_reference', 'zhs_mode') for r in app.radio)
+    assert any('最近一次真实读取' in c.value for c in app.caption)
+    assert not any('模拟' in b.label for b in app.button)
     assert any('受限真实读取' in i.value for i in app.info)
     assert any('部分读取' in w.value for w in app.warning)
     assert all(r.key != 'zhs_mode' for r in app.radio)          # no sandbox write mode
@@ -168,9 +180,11 @@ def test_latest_real_read_can_be_reviewed_in_the_app_page(tmp_path, monkeypatch)
     assert any('智慧树（受限真实读取）' in str(df.value.get('来源', [])) for df in app.dataframe)
     assert formal.read_bytes() == before                         # nothing was written
 
-    # Switching to the samples is always available and never writes either.
-    app.radio(key='zhs_review_source').set_value('开发样例（虚构）').run()
-    assert len([c for c in app.checkbox if c.key and c.key.startswith('zhs_review_pick_')]) == 7
+    # Stale choices from an older running UI cannot re-enable fictional sources.
+    app.session_state['zhs_reference'] = '虚构待办（体验匹配）'
+    app.session_state['zhs_review_source'] = '开发样例（虚构）'
+    app.run()
+    assert len([c for c in app.checkbox if c.key and c.key.startswith('zhs_review_pick_')]) == 2
     assert formal.read_bytes() == before
 
 
@@ -241,7 +255,7 @@ def test_manual_form_preserves_explicit_time_and_new_read_clears_old_edits(tmp_p
     monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
     report = real_read_report()
     payload.write_text(json.dumps(encode_report(report)), encoding='utf-8')
-    app = open_page()
+    app = open_page(production=True)
     assert '20:00' in app.text_input(key='zhs_review_edit_due_1').value
     app.text_input(key='zhs_review_edit_title_1').input('虚构人工修正标题')
     next(b for b in app.button if b.label == '应用补充 / 修改').click().run()
@@ -282,3 +296,46 @@ def test_entering_preview_invalidates_other_page_approvals(setup):
     assert app.session_state['notice_review'].preview is None
     assert not app.session_state['notice_confirm']
     assert 'notice_receipt' not in app.session_state and 'email_plan' not in app.session_state
+
+
+@pytest.mark.parametrize('payload_kind', ['missing', 'broken', 'synthetic'])
+def test_formal_page_never_falls_back_to_samples(setup, tmp_path, monkeypatch, payload_kind):
+    import json
+    from pku_deadline_agent.zhihuishu_validation import encode_report
+    payload = tmp_path / 'payload.json'
+    if payload_kind == 'broken':
+        payload.write_text('not-json', encoding='utf-8')
+    elif payload_kind == 'synthetic':
+        sample, _ = sample_review_data()
+        payload.write_text(json.dumps(encode_report(sample)), encoding='utf-8')
+    monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
+    before = setup[0].read_bytes()
+    def forbidden(*args, **kwargs): raise AssertionError('formal page must not load samples or call services')
+    monkeypatch.setattr('pku_deadline_agent.zhihuishu_samples.sample_review_data', forbidden)
+    monkeypatch.setattr('pku_deadline_agent.ai_client.HTTPSClient.complete', forbidden)
+    monkeypatch.setattr('pku_deadline_agent.zhihuishu_browser.BrowserRead.start', forbidden)
+    app = open_page(production=True)
+    assert not app.exception
+    assert not app.dataframe and not app.metric
+    assert not any(r.key in ('zhs_review_source', 'zhs_reference', 'zhs_mode') for r in app.radio)
+    assert not any(c.key == 'zhs_review_prod_authorize' for c in app.checkbox)
+    assert not any(b.key in ('zhs_review_prepare', 'zhs_review_save', 'zhs_review_confirm') for b in app.button)
+    assert any('只接受真实读取' in e.value for e in app.error) if payload_kind == 'synthetic' else any(
+        '还没有可用' in i.value for i in app.info)
+    assert setup[0].read_bytes() == before
+
+
+def test_real_payload_with_missing_database_reports_error_without_virtual_reference(tmp_path, monkeypatch):
+    import json
+    from test_zhihuishu_import import real_read_report
+    from pku_deadline_agent.zhihuishu_validation import encode_report
+    payload = tmp_path / 'payload.json'
+    payload.write_text(json.dumps(encode_report(real_read_report())), encoding='utf-8')
+    monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
+    missing = tmp_path / 'missing.sqlite3'
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(missing))
+    app = open_page(production=True)
+    assert not app.exception
+    assert any('无法只读读取或核验' in e.value for e in app.error)
+    assert not any(r.key == 'zhs_reference' for r in app.radio)
+    assert not missing.exists()

@@ -33,4 +33,4 @@ def prepare_fictional_database():
 
 st.set_page_config(page_title='智慧树差异预览 · 虚构数据',layout='wide')
 st.caption('此独立实例的“本地任务”也来自虚构库，不访问正式待办；仅用于界面验收。')
-render_zhihuishu_preview_page(prepare_fictional_database())
+render_zhihuishu_preview_page(prepare_fictional_database(), development=True)

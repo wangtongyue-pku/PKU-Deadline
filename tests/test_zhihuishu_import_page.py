@@ -10,7 +10,7 @@ from pku_deadline_agent.database import TaskRepository
 SCRIPT = '''import streamlit as st
 from pku_deadline_agent.zhihuishu_review_page import render_zhihuishu_preview_page
 target = st.session_state['fixture_target']
-render_zhihuishu_preview_page(target.path, import_target=target)
+render_zhihuishu_preview_page(target.path, import_target=target, development=True)
 '''
 
 
@@ -152,7 +152,8 @@ def test_production_app_has_no_active_write_or_mode_switch(setup,monkeypatch):
     app = AppTest.from_file(Path(__file__).resolve().parents[1]/'app.py',default_timeout=15)
     app.session_state['page']='智慧树任务预览'
     app.run()
-    assert not app.exception and app.button(key='zhs_review_production_closed').disabled
+    assert not app.exception and any('还没有可用' in i.value for i in app.info)
+    assert not any(b.key in ('zhs_review_prepare','zhs_review_save') for b in app.button)
     assert all(r.key!='zhs_mode' for r in app.radio)
     assert formal.read_bytes()==before
 

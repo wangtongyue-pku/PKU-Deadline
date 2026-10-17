@@ -25,7 +25,7 @@ SCRIPT = '''import streamlit as st
 from pku_deadline_agent.zhihuishu_review_page import render_zhihuishu_preview_page
 target = st.session_state['fixture_target']
 report = st.session_state.get('fixture_report')
-render_zhihuishu_preview_page(target.path, report=report, import_target=target)
+render_zhihuishu_preview_page(target.path, report=report, import_target=target, development=True)
 '''
 
 

@@ -36,4 +36,4 @@ def sandbox():
 st.set_page_config(page_title='智慧树人工入库验收 · 模拟库',layout='wide')
 st.caption('独立验收实例：真实 SQLite 事务只操作虚构库，正式任务、邮件和账号均不接触。')
 target = sandbox()
-render_zhihuishu_preview_page(target.path,import_target=target)
+render_zhihuishu_preview_page(target.path,import_target=target, development=True)
