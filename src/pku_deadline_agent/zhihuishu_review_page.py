@@ -218,7 +218,11 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                  + ('可切换虚构待办体验。' if development else '请检查本地数据库路径和版本。'))
         return
     can_write = write_mode and reference == '本地任务（只读）'
-    digest = fingerprint((snapshot.digest, reference, write_mode))
+    show_submitted = (st.checkbox('显示已提交作业', value=False, key='yue_show_submitted')
+                      if source == 'pku_yuetang' else True)
+    visible_items = tuple(i for i in snapshot.items if show_submitted or i.task.status != '已完成')
+    digest = fingerprint((snapshot.digest, reference, write_mode, show_submitted)
+                         if source == 'pku_yuetang' else (snapshot.digest, reference, write_mode))
     if st.session_state.get(PREFIX+'digest') != digest:
         previous_pending = st.session_state.get(PREFIX+'pending')
         previous_result = st.session_state.get('zhs_import_result')
@@ -233,6 +237,9 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
             st.session_state[f'{PREFIX}pick_{item.index}'] = False
             st.session_state[f'{PREFIX}{item.index}_action'] = '暂不处理'
     st.caption('本地任务包含已完成项，排除回收站；平台状态不会改动本地完成状态。当前对比只使用任务字段，不读取通知正文。')
+    if source == 'pku_yuetang':
+        st.caption(f'已隐藏 {len(snapshot.items)-len(visible_items)} 项已提交作业；'
+                   '未提交和逾期未提交继续显示，未知状态保留待核对。筛选不删除任务、不修改完成状态。')
     coverage = report.coverage
     if coverage.complete:
         st.success(f'{origin}：范围和字段已验证完整；保存前请核对选中任务。')
@@ -255,25 +262,29 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                 f'{REASONS.get(code, code)} ×{count}' for code, count in coverage.issue_counts))
         st.caption('无稳定来源 ID；临时编号只区分本次候选。同名任务不自动合并。')
     for col, category in zip(st.columns(4), CATEGORIES):
-        col.metric(category, sum(i.category == category for i in snapshot.items))
+        col.metric(category, sum(i.category == category for i in visible_items))
+    if not visible_items:
+        st.info('当前没有需显示的作业。可勾选“显示已提交作业”查看本次读取的已提交项；这不代表整课已完整读取。')
+        return
+    from pku_deadline_agent.yuetang_status import submission_label
     st.dataframe([{'编号': i.index, '分类': i.category, '课程': i.task.course or '待确认',
                    '任务标题': i.task.title or '缺失', '截止时间（北京时间）': format_deadline(i.task.deadline),
-                   '平台状态': i.task.status or '未知',
+                   '平台状态': submission_label(i.task) if source == 'pku_yuetang' else i.task.status or '未知',
                    '来源': f'{label}（虚构列表）' if fictional else f'{label}（受限真实读取）'}
-                  for i in snapshot.items], hide_index=True, use_container_width=True)
+                  for i in visible_items], hide_index=True, use_container_width=True)
 
     left, right = st.columns(2)
     if left.button('勾选全部候选', key=PREFIX+'all'):
-        for item in snapshot.items: st.session_state[f'{PREFIX}pick_{item.index}'] = True
+        for item in visible_items: st.session_state[f'{PREFIX}pick_{item.index}'] = True
     if right.button('取消全部选择', key=PREFIX+'none'):
-        for item in snapshot.items: st.session_state[f'{PREFIX}pick_{item.index}'] = False
+        for item in visible_items: st.session_state[f'{PREFIX}pick_{item.index}'] = False
 
     with st.expander('手动补充 / 修改任务信息（读取不完整的任务在这里补全）', expanded=not coverage.fields_complete):
         st.caption('留空表示“没有该信息”。补全标题与课程后该任务即可参与导入；'
                    '只写日期时截止时间仍记为待确认，不会补成午夜。修改只存在于本机会话。')
         with st.form(key=PREFIX+'edit_form'):
             pending = {}
-            for item in snapshot.items:
+            for item in visible_items:
                 columns = st.columns([1, 3, 2, 2, 1])
                 columns[0].text(f'候选 {item.index}')
                 pending[item.index] = (
@@ -289,7 +300,9 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                                          key=f'{PREFIX}edit_status_{item.index}'),
                 )
             if st.form_submit_button('应用补充 / 修改'):
-                collected = {}
+                # Hidden rows retain their earlier manual corrections; filtering
+                # changes visibility only, never the underlying review input.
+                collected = dict(edits) if source == 'pku_yuetang' else {}
                 try:
                     for index, (title, course, due_text, status) in pending.items():
                         due, date_text = _manual_deadline(due_text)
@@ -310,7 +323,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                 st.rerun()
 
     choices, unknown_deadlines, chosen_links = {}, set(), {}
-    for item in snapshot.items:
+    for item in visible_items:
         key = f'{PREFIX}{item.index}_'
         selected = st.checkbox(f'选择候选 {item.index} · {item.category}', key=f'{PREFIX}pick_{item.index}')
         with st.expander(f'候选 {item.index}：详情与人工匹配', expanded=selected):

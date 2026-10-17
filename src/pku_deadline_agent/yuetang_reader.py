@@ -10,6 +10,7 @@ from pku_deadline_agent.sources import SourceRejected
 from pku_deadline_agent.time_utils import BEIJING
 from pku_deadline_agent.zhihuishu_reader import ReadTask, _text
 from pku_deadline_agent.zhihuishu_scroll import ScrollCoverage, ScrollReport
+from pku_deadline_agent.yuetang_status import submission_status
 
 SOURCE = 'pku_yuetang'
 ENTRY = 'https://class.pku.edu.cn/'
@@ -96,7 +97,7 @@ def read_list(page,*,max_tasks=20,max_scrolls=12,allow_real=False):
     tasks=[]
     for pos,row in sorted(fragments.items()):
         due,day=parse_due(row.get('due'))
-        status={'未提交':'未完成','待提交':'未完成','已提交':'已完成','已批改':'已完成'}.get(row.get('status'),'未知')
+        status=submission_status(row.get('status'))
         tasks.append(ReadTask(_text(row.get('title'),200) or '',course,due,day,source_url=safe_list_url(page.url) if real else None,status=status,scan_position=pos))
     reasons=['boundary_unverified','displayed_total_unknown']
     if last['pagination']:reasons.append('pagination_not_traversed')
