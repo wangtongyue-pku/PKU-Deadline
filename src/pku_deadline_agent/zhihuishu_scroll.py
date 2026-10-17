@@ -74,6 +74,7 @@ class ScrollReport:
     course: str | None = field(repr=False)
     evidence: str
     requires_identity_review: bool = True
+    source: str = 'zhihuishu'
 
     @property
     def ready_for_sync(self) -> bool:

@@ -19,6 +19,7 @@ from pku_deadline_agent.zhihuishu_review import (
     ManualEdit,
     apply_edits,
     build_review,
+    blocking_warnings,
     fingerprint,
     is_fictional,
     origin_label,
@@ -32,6 +33,7 @@ from pku_deadline_agent.zhihuishu_import import (
     source_associations,
 )
 from pku_deadline_agent.zhihuishu_validation import load_latest
+from pku_deadline_agent.review_platforms import platform, compatible
 
 PREFIX = 'zhs_review_'
 # Session keys that hold USER INPUT (which source to review, manual corrections).
@@ -94,11 +96,12 @@ def _manual_deadline(text):
     return parsed, None
 
 
-def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None, development=False):
-    st.subheader('智慧树任务预览')
+def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None, development=False, source="zhihuishu"):
+    label, _ = platform(source)
+    st.subheader(f"{label}任务预览")
     if not development and report is None and import_target is None:
         from pku_deadline_agent.zhihuishu_browser_page import render_browser_read
-        render_browser_read()
+        render_browser_read(source=source)
     example_tasks = ()
     if development:
         # Explicit developer scripts/tests only; never read the user's payload.
@@ -106,12 +109,20 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
         sample, example_tasks = sample_review_data()
         report = report if report is not None else sample
     else:
-        report = report if report is not None else load_latest()
+        if source == "pku_yuetang":
+            from pku_deadline_agent.yuetang_validation import load_latest as load_yuetang
+            report = report if report is not None else load_yuetang()
+        else:
+            report = report if report is not None else load_latest()
         if report is None:
             invalidate_review()
-            st.info('还没有可用的智慧树读取结果。请点击上方“读取智慧树”，登录并打开作业未完成列表。')
+            st.info(f'还没有可用的{label}读取结果。请点击上方“读取{label}”，登录并打开作业列表。')
             return
         st.caption('数据来源：最近一次真实读取 · 对比当前本地任务')
+    if report.source != source:
+        invalidate_review()
+        st.error("读取来源与当前平台不匹配，拒绝审核或入库。")
+        return
     raw_digest = fingerprint(asdict(report))
     if st.session_state.get('zhs_input_digest') != raw_digest:
         # Corrections and permission belong to ONE raw read, not another course,
@@ -137,19 +148,22 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
         return
     if fictional and not development:
         invalidate_review()
-        st.error('正式页面只接受真实读取结果，请重新读取智慧树列表。')
+        st.error(f'正式页面只接受真实读取结果，请重新读取{label}列表。')
         return
     if not development and import_target is not None and not is_production(import_target):
         invalidate_review()
         st.error('正式页面不能使用开发数据库。')
         return
     if fictional:
-        st.info('开发预览：智慧树列表使用虚构数据。所有选择和确认仅模拟，不保存任务，不连接智慧树或 AI。'
+        st.info(f'开发预览：{label}列表使用虚构数据。所有选择和确认仅模拟，不保存任务，不连接{label}或 AI。'
                 if import_target is None else
-                '列表与专用库均为虚构数据。默认预览不写库；另选“模拟数据库入库”并确认后才写入虚构库。正式写入未开放，不连接智慧树或 AI。')
+                f'列表与专用库均为虚构数据。默认预览不写库；另选“模拟数据库入库”并确认后才写入虚构库。正式写入未开放，不连接{label}或 AI。')
     else:
         st.info(f'数据来源：{origin}，来自一次获你单独授权的有界读取。'
-                '在本地核对任务，不再访问智慧树或调用 AI；确认写入前不会修改任务库。')
+                f'在本地核对任务，不再访问{label}或调用 AI；确认写入前不会修改任务库。')
+    if source == 'pku_yuetang':
+        st.caption('平台状态未知时仍可人工新增本地待办；不表示平台已完成或未完成。'
+                   '来源链接为课程列表入口，并非作业详情；未采集正文、附件或私人认证参数。')
     write_mode = False
     associations_available = ()
     if import_target is not None:
@@ -158,7 +172,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
             if not is_production(import_target) and (
                     path is None or import_target.path.resolve() != Path(path).resolve()):
                 raise PermissionError('模拟目标与预览库不一致。')
-            associations_available = source_associations(import_target)
+            associations_available = source_associations(import_target, source)
         except (sqlite3.Error, OSError, ValueError, PermissionError):
             invalidate_review()
             st.error('无法验证写入目标，入库入口关闭。')
@@ -183,7 +197,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
             try:
                 import_target = ProductionImportTarget.open(database_path(), authorized=True)
                 import_target.check()
-                associations_available = source_associations(import_target)
+                associations_available = source_associations(import_target, source)
                 write_mode = True
             except (sqlite3.Error, OSError, ValueError, PermissionError) as error:
                 st.error(f'无法启用正式库写入：{error}')
@@ -245,7 +259,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
     st.dataframe([{'编号': i.index, '分类': i.category, '课程': i.task.course or '待确认',
                    '任务标题': i.task.title or '缺失', '截止时间（北京时间）': format_deadline(i.task.deadline),
                    '平台状态': i.task.status or '未知',
-                   '来源': '智慧树（虚构列表）' if fictional else '智慧树（受限真实读取）'}
+                   '来源': f'{label}（虚构列表）' if fictional else f'{label}（受限真实读取）'}
                   for i in snapshot.items], hide_index=True, use_container_width=True)
 
     left, right = st.columns(2)
@@ -312,9 +326,10 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                                '来源': m.task.source, '建议原因': m.reason} for m in item.matches], hide_index=True)
             elif not item.warnings:
                 st.caption('未找到匹配建议，仍需你决定是否为独立新增。')
-            only_unknown_due = item.warnings == (UNKNOWN_DEADLINE,)
+            blockers = blocking_warnings(item.warnings,source)
+            only_unknown_due = blockers == (UNKNOWN_DEADLINE,)
             actions = (('暂不处理','拟新增独立任务') if can_write and only_unknown_due else
-                       ('暂不处理',) if item.warnings else tuple(ACTIONS))
+                       ('暂不处理',) if blockers else tuple(ACTIONS))
             action_label = st.selectbox('本次拟处理方式', actions,
                                         key=key+'action', disabled=not selected)
             action, target, reason, distinct = ACTIONS[action_label], None, '', False
@@ -324,7 +339,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
             if action == 'new' and (item.matches or item.batch_peers):
                 distinct = st.checkbox('已核对相似项，仍拟作为独立任务', key=key+'distinct', disabled=not selected)
             if action in ('link', 'update'):
-                eligible = {t.id: t for t in tasks if identity(t.category) == identity(item.task.course or '') and t.task_type == '作业'}
+                eligible = {t.id: t for t in tasks if identity(t.category) == identity(item.task.course or '') and t.task_type == '作业' and compatible(source,t.source)}
                 target_id = st.selectbox('人工选择本地目标（不默认选中）', [None, *eligible],
                     format_func=lambda v: '尚未选择' if v is None else f'#{v} {eligible[v].title} · {format_deadline(eligible[v].due_at)}',
                     key=key+'target', disabled=not selected)

@@ -145,7 +145,7 @@ class TaskRepository:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_reminder_state ON reminder_events(state)")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _migrate_source_check(self, connection, *, include_zhihuishu=False) -> None:
+    def _migrate_source_check(self, connection, *, include_zhihuishu=False, include_pku_yuetang=False) -> None:
         """v3 -> v4: allow ``email`` as a task source.
 
         The allowed values live in a CHECK constraint, and SQLite cannot alter a
@@ -165,10 +165,12 @@ class TaskRepository:
         ddl = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
-        required = "'zhihuishu'" if include_zhihuishu else "'email'"
-        source_values = _SOURCE_VALUES + (", 'zhihuishu'" if include_zhihuishu else "")
-        if ddl is None or required in (ddl[0] or ""):
+        requested = ['email'] + (['zhihuishu'] if include_zhihuishu else []) + (['pku_yuetang'] if include_pku_yuetang else [])
+        if ddl is None or all(repr(s) in (ddl[0] or '') for s in requested):
             return
+        # Preserve independently enabled extensions when rebuilding either one.
+        enabled = [s for s in ('zhihuishu','pku_yuetang') if s in requested or repr(s) in (ddl[0] or '')]
+        source_values = _SOURCE_VALUES + ''.join(', '+repr(s) for s in enabled)
         present = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
         columns = ", ".join(name for name in _TASK_COLUMNS if name in present)
         if not columns:
@@ -374,7 +376,9 @@ class TaskRepository:
             normalize_datetime(due_at)
 
     def _matches(self, connection, candidate, origin):
+        from pku_deadline_agent.review_platforms import compatible
         tasks = [self._to_task(row) for row in connection.execute("SELECT * FROM tasks WHERE deleted_at IS NULL")]
+        tasks = [t for t in tasks if compatible(origin.source,t.source)]
         if origin.source == "email" and origin.notice_hash:
             linked = {row[0] for row in connection.execute("SELECT task_id FROM task_notices WHERE source='email' AND notice_hash=?", (origin.notice_hash,))}
             if linked:
@@ -479,6 +483,9 @@ class TaskRepository:
                         raise ValueError("同一批不能多次修改或关联同一个任务，请分开核对。")
                     targets.add(decision.target_id)
                     row = self._checked_row(connection, decision.target_id, decision.expected_revision)
+                    from pku_deadline_agent.review_platforms import compatible
+                    if not compatible(origin.source,row['source']):
+                        raise ValueError('不同平台的作业不能直接关联或覆盖。')
                     if decision.action == "link":
                         # Associating a duplicate never changes any task fields.
                         result = self._to_task(row)

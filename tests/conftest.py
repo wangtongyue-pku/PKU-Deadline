@@ -10,6 +10,7 @@ def isolate_real_credentials(monkeypatch, tmp_path):
     # The daily real-read payload is local user data: no test may pick it up by
     # accident. Tests that exercise it point the variable at their own copy.
     monkeypatch.setenv("PKU_ZHIHUISHU_PAYLOAD", str(tmp_path / "no-real-payload.json"))
+    monkeypatch.setenv("PKU_YUETANG_PAYLOAD", str(tmp_path / "no-yuetang-payload.json"))
     try:
         from keyring.backends.Windows import WinVaultKeyring
     except ImportError:

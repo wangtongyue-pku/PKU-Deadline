@@ -12,7 +12,7 @@ from pku_deadline_agent.time_utils import BEIJING, beijing_now, format_deadline,
 
 ACTION_LABELS = {"create": "新增", "edit": "编辑", "postpone": "延期", "advance": "提前", "deadline_correction": "截止修正",
                  "complete": "标记完成", "reopen": "恢复待办", "delete": "移入回收站", "restore": "恢复任务", "link_notice": "关联重复通知"}
-SOURCE_LABELS = {"manual": "手动录入", "wechat": "微信通知（手动粘贴）", "teaching_platform": "教学网", "programming_grid": "编程网格", "zhihuishu": "智慧树（人工确认）"}
+SOURCE_LABELS = {"manual": "手动录入", "wechat": "微信通知（手动粘贴）", "teaching_platform": "教学网", "programming_grid": "编程网格", "zhihuishu": "智慧树（人工确认）", "pku_yuetang": "问学阅堂（人工确认）"}
 
 
 def render_import_choice(repository, candidate, origin, key, on_change=None):

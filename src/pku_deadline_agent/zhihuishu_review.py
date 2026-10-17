@@ -11,9 +11,16 @@ from pku_deadline_agent.task_management import ImportDecision, MatchSuggestion, 
 from pku_deadline_agent.time_utils import BEIJING, normalize_datetime
 from pku_deadline_agent.zhihuishu_reader import ReadTask, _text, possible_matches
 from pku_deadline_agent.zhihuishu_scroll import ScrollReport
+from pku_deadline_agent.review_platforms import compatible, platform
 
 CATEGORIES = ('待新增', '可能重复', '疑似截止时间变更', '信息不足')
 UNKNOWN_DEADLINE = '截止日期或时刻缺失，不自动补造'
+
+def blocking_warnings(warnings, source):
+    # Yuetang's unfamiliar tag remains UNKNOWN, never a claim of submission.
+    # Users can still import a local todo; platform state is stored separately
+    # and never changes local completion. Missing identity/time rules stay intact.
+    return tuple(w for w in warnings if not (source=='pku_yuetang' and w=='平台完成状态未知'))
 # Sibling candidates only need stable fields for the shared matcher; they are
 # never stored or compared for identity.
 SIBLING_STAMP = datetime.min.replace(tzinfo=BEIJING)
@@ -116,6 +123,7 @@ def apply_edits(report: ScrollReport, edits) -> ScrollReport:
 
 
 def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
+    platform(report.source)
     if len(report.tasks) > 20:
         raise ValueError('预览累计最多 20 条任务。')
     local = tuple(t for t in tasks if t.deleted_at is None)
@@ -123,7 +131,7 @@ def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
     # the write transaction uses. Without this the conflict only appears after the
     # user has already confirmed twice, as a rolled-back batch.
     siblings = tuple(Task(index + 1, task.title, task.course or '', '作业', task.deadline,
-                          'zhihuishu', False, SIBLING_STAMP, SIBLING_STAMP)
+                          report.source, False, SIBLING_STAMP, SIBLING_STAMP)
                      for index, task in enumerate(report.tasks))
     items = []
     for index, task in enumerate(report.tasks):
@@ -138,9 +146,9 @@ def build_review(report: ScrollReport, tasks) -> ReviewSnapshot:
         if task.kind != 'homework': warnings.append('当前读取路线仅验证作业，不混用其他时间语义')
         candidate = ExtractedTask(index+1, task.title, task.course or '', '作业',
                                   None, task.deadline, False, ())
-        matches = find_matches(candidate, list(local), {}) if task.title.strip() else ()
+        matches = find_matches(candidate, [t for t in local if compatible(report.source,t.source)], {}) if task.title.strip() else ()
         peers = batch_peers(index + 1, task, candidate, siblings, report.tasks)
-        category = ('信息不足' if warnings else
+        category = ('信息不足' if blocking_warnings(warnings,report.source) else
                     '疑似截止时间变更' if any(m.kind == 'deadline_change' for m in matches) else
                     '可能重复' if matches or peers else '待新增')
         items.append(ReviewItem(index+1, task, category, matches, tuple(warnings), peers))
@@ -191,7 +199,7 @@ def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision
             raise ValueError('预览项或模拟操作无效。')
         if choice.action == 'skip': continue
         item = items[index]
-        unknown_new = (item.warnings == (UNKNOWN_DEADLINE,) and choice.action == 'new'
+        unknown_new = (blocking_warnings(item.warnings,snapshot.report.source) == (UNKNOWN_DEADLINE,) and choice.action == 'new'
                        and index in unknown_deadlines)
         if item.category == '信息不足' and not unknown_new:
             raise ValueError(f'第 {index} 项信息不足，只能查看或暂不处理。')
@@ -205,6 +213,8 @@ def simulate_choices(snapshot: ReviewSnapshot, choices: dict[int, ImportDecision
             target = local.get(choice.target_id)
             if target is None or target.revision != choice.expected_revision:
                 raise ValueError('未选择有效目标，或目标版本已变化，请重新核对。')
+            if not compatible(snapshot.report.source,target.source):
+                raise ValueError('不同平台的作业不能直接关联或覆盖。')
             if identity(target.category) != identity(item.task.course or '') or target.task_type != '作业':
                 raise ValueError('课程或类型不一致，不能拟关联或改期；请先核对来源信息。')
             if target.id in targets:

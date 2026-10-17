@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 TASK_TYPES = ("作业", "考试", "活动报名", "其他")
-# zhihuishu additionally requires the explicitly enabled extension migration;
+# zhihuishu / pku_yuetang require explicitly enabled extension migrations;
 # ordinary initialize() never activates it on an existing user database.
-SOURCES = ("manual", "wechat", "teaching_platform", "programming_grid", "email", "zhihuishu")
+SOURCES = ("manual", "wechat", "teaching_platform", "programming_grid", "email", "zhihuishu", "pku_yuetang")
 
 
 @dataclass(frozen=True)

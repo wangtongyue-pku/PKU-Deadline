@@ -18,7 +18,8 @@ from pku_deadline_agent.extraction import ExtractedTask
 from pku_deadline_agent.sources import SourceRejected
 from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin
 from pku_deadline_agent.time_utils import beijing_now, normalize_datetime
-from pku_deadline_agent.zhihuishu_reader import _text, _source_link
+from pku_deadline_agent.zhihuishu_reader import _text
+from pku_deadline_agent.review_platforms import platform, source_link
 from pku_deadline_agent.zhihuishu_review import ReviewSnapshot, build_review, simulate_choices, fingerprint
 
 FATAL_READ_REASONS = {'source_or_structure_changed','browser_read_failed','session_auth_required',
@@ -182,9 +183,10 @@ class ImportReceipt:
 
 
 def _receipt(connection, batch):
-    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zhs_import_receipts'").fetchone()
+    _, prefix = platform(batch.snapshot.report.source)
+    exists = connection.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{prefix}_import_receipts'").fetchone()
     if not exists: return None
-    row = connection.execute('SELECT * FROM zhs_import_receipts WHERE batch_id=?', (batch.batch_id,)).fetchone()
+    row = connection.execute(f'SELECT * FROM {prefix}_import_receipts WHERE batch_id=?', (batch.batch_id,)).fetchone()
     if row is None: return None
     if row['payload_digest'] != batch.digest:
         raise ValueError('该批次已提交但内容不同；未重复执行，请重新核对。')
@@ -193,22 +195,23 @@ def _receipt(connection, batch):
                          tuple(data['association_ids']), bool(data['partial']), True)
 
 
-def _migrate(repository, connection):
+def _migrate(repository, connection, source="zhihuishu"):
+    label, prefix = platform(source)
     if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
         raise ValueError('需先核对核心数据库版本；本入口不自动升级旧核心库。')
-    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zhs_extension'").fetchone()
+    exists = connection.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{prefix}_extension'").fetchone()
     if exists:
-        row = connection.execute('SELECT version FROM zhs_extension WHERE id=1').fetchone()
+        row = connection.execute(f'SELECT version FROM {prefix}_extension WHERE id=1').fetchone()
         if row is None or row[0] != 1: raise ValueError('智慧树扩展版本不兼容，停止写入。')
-    repository._migrate_source_check(connection, include_zhihuishu=True)
-    connection.execute('CREATE TABLE IF NOT EXISTS zhs_extension (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)')
-    connection.execute('INSERT OR IGNORE INTO zhs_extension VALUES (1,1)')
-    connection.execute('''CREATE TABLE IF NOT EXISTS zhs_source_links (
+    repository._migrate_source_check(connection, **{"include_"+source: True})
+    connection.execute(f'CREATE TABLE IF NOT EXISTS {prefix}_extension (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)')
+    connection.execute(f'INSERT OR IGNORE INTO {prefix}_extension VALUES (1,1)')
+    connection.execute(f'''CREATE TABLE IF NOT EXISTS {prefix}_source_links (
         local_id TEXT PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
         course TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
         deadline_text TEXT, source_url TEXT, platform_status TEXT NOT NULL, observed_due_at TEXT,
         first_seen TEXT NOT NULL, last_reviewed TEXT NOT NULL)''')
-    connection.execute('''CREATE TABLE IF NOT EXISTS zhs_import_receipts (
+    connection.execute(f'''CREATE TABLE IF NOT EXISTS {prefix}_import_receipts (
         batch_id TEXT PRIMARY KEY, payload_digest TEXT NOT NULL, result_json TEXT NOT NULL,
         applied_at TEXT NOT NULL)''')
 
@@ -221,6 +224,7 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
     """
     if not isinstance(target, (SandboxImportTarget, ProductionImportTarget)):
         raise PermissionError('未授权的写入目标。')
+    label, prefix = platform(batch.snapshot.report.source)
     target.check()
     if not confirmed: raise ValueError('请审核最终方案并明确确认入库。')
     _require_matching_evidence(target, batch.snapshot.report)
@@ -245,7 +249,10 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
         target.check(c)
         previous = _receipt(c,batch)
         if previous: return previous
-        _migrate(repository,c)
+        if batch.snapshot.report.source == "zhihuishu":
+            _migrate(repository,c)
+        else:
+            _migrate(repository,c,batch.snapshot.report.source)
         current = [repository._to_task(row) for row in c.execute('SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY id')]
         fresh = build_review(batch.snapshot.report, sorted(current,key=lambda t:t.id))
         # Canonical ordering is independent of deadline ordering in the board.
@@ -259,16 +266,16 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
         for op in plan.operations:
             incoming, link = op.incoming, ids[op.index]
             # Reuse the reader's local field/credential validation before storage.
-            reason = op.reason or '用户逐项核验后确认智慧树任务导入'
+            reason = op.reason or f'用户逐项核验后确认{label}任务导入'
             try:
                 title, course = _text(incoming.title,200), _text(incoming.course,100)
                 date_text = _text(incoming.deadline_date,80)
-                source_url = _source_link(incoming.source_url,'https://wenda.zhihuishu.com/')
+                source_url = source_link(batch.snapshot.report.source,incoming.source_url)
                 _text(reason,500)
             except SourceRejected:
                 raise ValueError('字段或来源链接含风险或无效内容，整批未保存；请修改后重新审核。') from None
             if not title or not course: raise ValueError('标题或课程缺失。')
-            existing = c.execute('SELECT * FROM zhs_source_links WHERE local_id=?',(link,)).fetchone()
+            existing = c.execute(f'SELECT * FROM {prefix}_source_links WHERE local_id=?',(link,)).fetchone()
             if existing and (op.action == 'new' or existing['task_id'] != op.target.id
                              or existing['course'] != course or existing['kind'] != incoming.kind):
                 raise ValueError('本地来源关联冲突，不能重绑或重复新增。')
@@ -276,17 +283,17 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
             # For a deadline update retain the user's own title/type/category.
             candidates.append(ExtractedTask(op.index,op.target.title if op.action=='update' else title,
                 op.target.category if op.action=='update' else course,'作业',date_text,incoming.deadline,
-                op.action=='update',('智慧树人工审核；部分导入非完整同步' if partial else '智慧树人工审核导入',)))
+                op.action=='update',(f'{label}人工审核；部分导入非完整同步' if partial else f'{label}人工审核导入',)))
             decisions.append(ImportDecision(op.action,op.target.id if op.target else None,
                 op.target.revision if op.target else None,reason,choices[op.index].allow_distinct))
-            origins.append(NoticeOrigin('zhihuishu',fingerprint(('local-association',link))))
+            origins.append(NoticeOrigin(batch.snapshot.report.source,fingerprint(('local-association',link))))
             metadata.append((course,title,date_text,source_url))
         tasks = repository.apply_reviewed_tasks(tuple(candidates),tuple(decisions),tuple(origins),confirmed=True,_connection=c)
         for op,task,fields in zip(plan.operations,tasks,metadata):
             incoming, link = op.incoming, ids[op.index]
             course,title,date_text,source_url = fields
             now = beijing_now().isoformat()
-            c.execute('''INSERT INTO zhs_source_links VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            c.execute(f'''INSERT INTO {prefix}_source_links VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(local_id) DO UPDATE SET title=excluded.title,deadline_text=excluded.deadline_text,
                 source_url=excluded.source_url,platform_status=excluded.platform_status,
                 observed_due_at=excluded.observed_due_at,last_reviewed=excluded.last_reviewed''',
@@ -295,16 +302,17 @@ def apply_import(target, batch, *, confirmed=False, partial_confirmed=False):
         if c.execute('PRAGMA foreign_key_check').fetchone(): raise ValueError('数据库关联完整性检查失败。')
         data = {'task_ids':[t.id for t in tasks],'actions':[op.action for op in plan.operations],
                 'association_ids':[ids[op.index] for op in plan.operations],'partial':partial}
-        c.execute('INSERT INTO zhs_import_receipts VALUES (?,?,?,?)',
+        c.execute(f'INSERT INTO {prefix}_import_receipts VALUES (?,?,?,?)',
                   (batch.batch_id,batch.digest,json.dumps(data),beijing_now().isoformat()))
         return ImportReceipt(batch.batch_id,tuple(data['task_ids']),tuple(data['actions']),
                              tuple(data['association_ids']),partial,False,backup)
 
 
-def source_associations(target):
+def source_associations(target, source="zhihuishu"):
     """Human-selectable local links. No automatic match or platform identity claim."""
+    _, prefix = platform(source)
     target.check()
     with sqlite3.connect(target.path.as_uri()+'?mode=ro',uri=True) as c:
         c.row_factory = sqlite3.Row
-        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zhs_source_links'").fetchone(): return ()
-        return tuple(dict(row) for row in c.execute('SELECT * FROM zhs_source_links ORDER BY first_seen,local_id'))
+        if not c.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{prefix}_source_links'").fetchone(): return ()
+        return tuple(dict(row) for row in c.execute(f'SELECT * FROM {prefix}_source_links ORDER BY first_seen,local_id'))
