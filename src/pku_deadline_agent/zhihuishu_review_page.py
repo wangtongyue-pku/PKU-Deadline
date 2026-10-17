@@ -96,6 +96,15 @@ def _manual_deadline(text):
     return parsed, None
 
 
+def _available_actions(item, source, can_write):
+    blockers = blocking_warnings(item.warnings, source)
+    actions = (('暂不处理', '拟新增独立任务') if can_write and blockers == (UNKNOWN_DEADLINE,) else
+               ('暂不处理',) if blockers else tuple(ACTIONS))
+    if source == 'pku_yuetang' and '拟新增独立任务' in actions:
+        return ('拟新增独立任务', *(a for a in actions if a != '拟新增独立任务'))
+    return actions
+
+
 def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None, development=False, source="zhihuishu"):
     label, _ = platform(source)
     st.subheader(f"{label}任务预览")
@@ -220,7 +229,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
     show_submitted = (st.checkbox('显示已提交作业', value=False, key='yue_show_submitted')
                       if source == 'pku_yuetang' else True)
     visible_items = tuple(i for i in snapshot.items if show_submitted or i.task.status != '已完成')
-    digest = fingerprint((snapshot.digest, reference, write_mode, show_submitted)
+    digest = fingerprint((snapshot.digest, reference, write_mode, show_submitted, 'default_new_v1')
                          if source == 'pku_yuetang' else (snapshot.digest, reference, write_mode))
     if st.session_state.get(PREFIX+'digest') != digest:
         previous_pending = st.session_state.get(PREFIX+'pending')
@@ -234,7 +243,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
         # commit; deleting server state alone can leave old client checkmarks.
         for item in snapshot.items:
             st.session_state[f'{PREFIX}pick_{item.index}'] = False
-            st.session_state[f'{PREFIX}{item.index}_action'] = '暂不处理'
+            st.session_state[f'{PREFIX}{item.index}_action'] = _available_actions(item, source, can_write)[0]
     st.caption('本地任务包含已完成项，排除回收站；平台状态不会改动本地完成状态。当前对比只使用任务字段，不读取通知正文。')
     if source == 'pku_yuetang':
         st.caption(f'已隐藏 {len(snapshot.items)-len(visible_items)} 项已提交作业；'
@@ -345,8 +354,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
                 st.caption('未找到匹配建议，仍需你决定是否为独立新增。')
             blockers = blocking_warnings(item.warnings,source)
             only_unknown_due = blockers == (UNKNOWN_DEADLINE,)
-            actions = (('暂不处理','拟新增独立任务') if can_write and only_unknown_due else
-                       ('暂不处理',) if blockers else tuple(ACTIONS))
+            actions = _available_actions(item, source, can_write)
             action_label = st.selectbox('本次拟处理方式', actions,
                                         key=key+'action', disabled=not selected)
             action, target, reason, distinct = ACTIONS[action_label], None, '', False
