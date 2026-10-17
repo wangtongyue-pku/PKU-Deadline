@@ -266,10 +266,9 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
     if not visible_items:
         st.info('当前没有需显示的作业。可勾选“显示已提交作业”查看本次读取的已提交项；这不代表整课已完整读取。')
         return
-    from pku_deadline_agent.yuetang_status import submission_label
     st.dataframe([{'编号': i.index, '分类': i.category, '课程': i.task.course or '待确认',
                    '任务标题': i.task.title or '缺失', '截止时间（北京时间）': format_deadline(i.task.deadline),
-                   '平台状态': submission_label(i.task) if source == 'pku_yuetang' else i.task.status or '未知',
+                   **({'平台状态': i.task.status or '未知'} if source != 'pku_yuetang' else {}),
                    '来源': f'{label}（虚构列表）' if fictional else f'{label}（受限真实读取）'}
                   for i in visible_items], hide_index=True, use_container_width=True)
 
