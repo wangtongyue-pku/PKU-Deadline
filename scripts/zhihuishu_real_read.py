@@ -1,38 +1,23 @@
-"""One authorized, scope-capped REAL read of the list currently on screen.
+"""Foreground worker for the app's explicitly authorized bounded real read.
 
-Flow (nothing is read until the operator confirms):
+The app launches this existing Playwright route in a fresh per-run directory,
+signals read.request only after the user logs in and opens ONE homework list,
+and can send cancel.request. Wait expires after 15 minutes. One explicit retry
+is allowed. All outcomes close the owned browser and clean its fresh profile;
+old diagnostics and previous reports are never deleted. Whitelisted reports
+reach the app only after process exit. No database or AI code lives here.
 
-1. Open a temporary VISIBLE, maximized browser window at the Zhihuishu entry
-   page. It uses a throwaway profile directory that is deleted when the session
-   ends (``--keep-profile`` keeps it across a diagnostic restart only, so a login
-   does not have to be repeated; it is still deleted before the round is over).
-2. While waiting, log which pages AND iframes this browser can actually see
-   (sanitized address shapes only) — so "you are in the wrong window" or "the
-   list lives inside an iframe" is visible before any read is attempted.
-3. Wait for ``.local-tmp/zhs-validation/read.request``, which the assistant
-   creates only after the operator says the target list is open.
-4. Try the bounded read on every page and frame this browser sees, most likely
-   target first: 作业 → 未完成, at most 5 tasks, at most one positioning scroll,
-   validation-only mode. A target that is not the authorized list is refused by
-   the reader's own URL gate before any field is read.
-5. If nothing can be read, run a STRUCTURAL probe (node counts and booleans only
-   — never task text) and record it, so the reason is diagnosable.
-6. On success write the whitelisted display payload (title/course/deadline/status
-   and coverage counters — never observed IDs, links or page text) plus a
-   counts-only summary, then close the browser.
-
-If no target can be read, the window stays open and the script waits for
-``retry.request``. Retrying re-imports the reader modules in place.
-
-Run: .\\.venv\\Scripts\\python.exe scripts/zhihuishu_real_read.py
+The CLI remains a diagnostic entry; ordinary users use the app buttons.
 """
 
 import importlib
+import argparse
 import json
 import re
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -42,13 +27,15 @@ sys.path.insert(0, str(ROOT / 'src'))
 from pku_deadline_agent.grid_session import detect_channel  # noqa: E402
 from pku_deadline_agent.zhihuishu_reader import FLIPPED_HOMEWORK_LIST_PATH, REAL_HOST  # noqa: E402
 
-OUT = ROOT / '.local-tmp' / 'zhs-validation'
+OUT = ROOT / '.local-tmp' / 'zhs-sessions' / str(uuid.uuid4())
 PROFILE = OUT / 'profile'
 # The one address the reader's validation mode is allowed to read. The script
 # opens it directly so the operator and the script are looking at the same page.
 ENTRY = 'https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/'
 TRIGGERS = ('read.request', 'retry.request')
-KEEP_PROFILE = '--keep-profile' in sys.argv
+MAX_TASKS, MAX_SCROLLS = 5, 1
+SESSION_SECONDS = 15 * 60
+OWN_PROFILE = False
 FORBIDDEN = re.compile(r'exam|paper|answer|submit|video|learn|login|auth', re.I)
 STRUCTURAL = {'stu', 'courseInfo', 'homeworkExam', 'index', 'homework', 'exam', 'html'}
 
@@ -60,7 +47,6 @@ PROBE = """() => {
       if (st.display === 'none' || st.visibility === 'hidden') return false; }
     return true; }).length;
   return {
-    title: document.title,
     homework_content: count('.homework-content'),
     homework_items: count('.homework-item'),
     visible_items: visible('.homework-item'),
@@ -185,9 +171,21 @@ def targets(context):
     return sorted(found, key=rank)
 
 
+def list_targets(context):
+    """Only the observed list route; never inspect login/learning/exam pages."""
+    found = []
+    for kind, target in targets(context):
+        p = urlsplit(target.url)
+        if (p.scheme == 'https' and p.hostname == REAL_HOST and
+                p.port in (None, 443) and not p.username and not p.password and
+                p.path in (FLIPPED_HOMEWORK_LIST_PATH, FLIPPED_HOMEWORK_LIST_PATH.rstrip('/'))):
+            found.append((kind, target))
+    return found
+
+
 def watch(context) -> None:
     snapshot = []
-    for kind, target in targets(context):
+    for kind, target in list_targets(context):
         try:
             snapshot.append(url_shape(target.url) | {'kind': kind})
         except Exception:                        # noqa: BLE001
@@ -200,18 +198,18 @@ def watch(context) -> None:
 def probe(context) -> list:
     """Where is the 作业/未完成 list? Counts and booleans only."""
     results = []
-    for kind, target in targets(context):
+    for kind, target in list_targets(context):
         try:
             results.append(url_shape(target.url) | {'kind': kind,
                                                     'nodes': target.evaluate(PROBE)})
         except Exception as error:               # noqa: BLE001
-            results.append({'kind': kind, 'probe_failed': f'{type(error).__name__}: {str(error)[:160]}'})
+            results.append({'kind': kind, 'probe_failed': True})
     return results
 
 
 def first_nodes(context):
     """Node counts of the best candidate, or None when nothing can be probed."""
-    for kind, target in targets(context):
+    for kind, target in list_targets(context):
         try:
             return target.evaluate(PROBE)
         except Exception:                        # noqa: BLE001 - try the next one
@@ -224,6 +222,8 @@ def wait_for_render(context, seconds=RENDER_WAIT_SECONDS):
     deadline = time.monotonic() + seconds
     nodes = None
     while time.monotonic() < deadline:
+        if (OUT / 'cancel.request').exists():
+            return None
         nodes = first_nodes(context)
         if nodes and nodes.get('homework_items', 0) > 0:
             return nodes
@@ -235,7 +235,7 @@ def census(context, profile) -> dict:
     """Structural field-binding census of the best candidate (no text at all)."""
     params = {'title': profile.title, 'deadline': profile.deadline,
               'card_course': profile.card_course}
-    for kind, target in targets(context):
+    for kind, target in list_targets(context):
         try:
             return {'kind': kind, 'url': url_shape(target.url),
                     'nodes': target.evaluate(CENSUS, params)}
@@ -254,23 +254,22 @@ def readers(reload=False):
         for module in (reader, scroll, session, validation):
             importlib.reload(module)
     return (session.read_list_for_review, reader.FLIPPED_HOMEWORK_VALIDATION_PROFILE,
-            session.ReviewReadScope(max_tasks=5, max_scrolls=1),
+            session.ReviewReadScope(max_tasks=MAX_TASKS, max_scrolls=MAX_SCROLLS, auto_container=True),
             validation.encode_report, validation.summarize)
 
 
-def main() -> int:
+def _run() -> int:
+    global OWN_PROFILE
+    # Each run owns a NEW directory. Never delete earlier diagnostic data.
     OUT.mkdir(parents=True, exist_ok=True)
-    if not KEEP_PROFILE:
-        shutil.rmtree(PROFILE, ignore_errors=True)
-    for stale in TRIGGERS + ('report.json', 'summary.json', 'watch.log', 'probe.json',
-                             'census.json', 'url-shapes.json'):
-        (OUT / stale).unlink(missing_ok=True)
-    print(f'[zhihuishu-real-read] profile={"kept" if KEEP_PROFILE else "fresh"}', flush=True)
+    if PROFILE.exists() or (OUT / 'status.txt').exists():
+        raise ValueError('会话目录已使用，拒绝复用登录状态。')
 
     from playwright.sync_api import sync_playwright
 
     status('launching-browser')
-    PROFILE.mkdir(parents=True, exist_ok=True)
+    PROFILE.mkdir(parents=True, exist_ok=False)
+    OWN_PROFILE = True
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE), channel=detect_channel(), headless=False,
@@ -290,9 +289,13 @@ def main() -> int:
             entry.goto(ENTRY, wait_until='domcontentloaded')
             status('waiting-for-operator: log in and open the 作业/未完成 list')
             watch(context)
+            expires = time.monotonic() + SESSION_SECONDS
             for attempt, trigger in enumerate(TRIGGERS, 1):
                 request = OUT / trigger
                 while not request.exists():
+                    if (OUT / 'cancel.request').exists() or time.monotonic() > expires:
+                        status('cancelled-or-expired')
+                        return 1
                     if all(p.is_closed() for p in context.pages):
                         status('browser-closed-by-operator')
                         return 1
@@ -300,8 +303,14 @@ def main() -> int:
                     time.sleep(2)
 
                 read, profile, scope, encode, summarize = readers(reload=attempt > 1)
+                if len(list_targets(context)) != 1:
+                    status('multiple-or-missing-lists: keep exactly one target list open')
+                    continue
                 status(f'attempt-{attempt}: waiting for the list to render')
                 nodes = wait_for_render(context)
+                if (OUT / 'cancel.request').exists():
+                    status('cancelled-or-expired')
+                    return 1
                 print(f'[zhihuishu-real-read] rendered nodes: '
                       f'{json.dumps(nodes, ensure_ascii=False)}', flush=True)
                 (OUT / 'probe.json').write_text(
@@ -312,15 +321,26 @@ def main() -> int:
 
                 shapes, failure = [], '没有可读取的页面或 iframe'
                 status(f'attempt-{attempt}: reading')
-                for kind, target in targets(context):
+                candidates = list_targets(context)
+                # Two open course views cannot silently become a multi-course read.
+                if len(candidates) != 1:
+                    status('multiple-or-missing-lists: keep exactly one target list open')
+                    continue
+                for kind, target in candidates:
                     shapes.append(url_shape(target.url) | {'kind': kind})
                     print(json.dumps(shapes[-1], ensure_ascii=False), flush=True)
                     try:
                         report = read(target, profile, scope=scope,
                                       allow_real=True, validation_only=True)
                     except Exception as error:   # noqa: BLE001 - try the next target
-                        failure = f'{type(error).__name__}: {str(error)[:200]}'
-                        continue
+                        # It may already have touched some fields. A second read
+                        # would reset the round's cumulative task budget.
+                        status('error: bounded read failed; start a newly authorized round')
+                        return 1
+
+                    if (OUT / 'cancel.request').exists():
+                        status('cancelled-or-expired')
+                        return 1
 
                     payload = encode(report)
                     (OUT / 'report.json').write_text(
@@ -342,13 +362,35 @@ def main() -> int:
                 return 1
             return 1
         except Exception as error:               # noqa: BLE001 - report, never guess
-            status(f'error: {type(error).__name__}: {str(error)[:300]}')
+            status('error: browser session failed; no database was written')
             return 1
         finally:
             context.close()
-            if not KEEP_PROFILE:
-                shutil.rmtree(PROFILE, ignore_errors=True)
+
+
+def main() -> int:
+    try:
+        return _run()
+    except Exception:
+        status('error: browser session failed; no database was written')
+        return 1
+    finally:
+        # Also covers launch/import failures; never clean a pre-existing profile.
+        if OWN_PROFILE and PROFILE.resolve().parent == OUT.resolve():
+            try:
+                shutil.rmtree(PROFILE)
+            except OSError:
+                status('cleanup-failed: close the temporary browser before retrying')
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='智慧树受限只读会话（需本人授权与登录）')
+    parser.add_argument('--session-dir', type=Path)
+    parser.add_argument('--max-tasks', type=int, default=5, choices=range(1, 21))
+    parser.add_argument('--max-scrolls', type=int, default=1, choices=range(1, 13))
+    args = parser.parse_args()
+    if args.session_dir is not None:
+        OUT = args.session_dir.resolve()
+    PROFILE = OUT / 'profile'
+    MAX_TASKS, MAX_SCROLLS = args.max_tasks, args.max_scrolls
     sys.exit(main())

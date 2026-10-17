@@ -34,7 +34,8 @@ DEFAULT_PAYLOAD = (Path(__file__).resolve().parents[2]
 
 def payload_path() -> Path:
     override = os.environ.get(PAYLOAD_ENV, '').strip()
-    return Path(override) if override else DEFAULT_PAYLOAD
+    current = DEFAULT_PAYLOAD.parent.parent / 'zhs-current.json'
+    return Path(override) if override else (current if current.exists() else DEFAULT_PAYLOAD)
 
 
 def load_latest(path=None) -> ScrollReport | None:

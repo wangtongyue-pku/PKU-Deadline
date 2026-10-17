@@ -39,7 +39,7 @@ def select_action(app,index,label):
 def test_page_has_four_groups_full_fields_and_incomplete_warning(setup):
     app = open_page()
     assert not app.exception
-    assert len(app.checkbox)==7
+    assert len([c for c in app.checkbox if c.key.startswith('zhs_review_')])==7
     assert {m.label for m in app.metric}=={'待新增','可能重复','疑似截止时间变更','信息不足'}
     assert any('不能推断' in w.value for w in app.warning)
     assert any('虚构数据' in i.value for i in app.info)
@@ -133,7 +133,7 @@ def test_missing_database_reports_failure_and_creates_nothing(tmp_path,monkeypat
     assert not app.exception and any('未将失败当成空库' in e.value for e in app.error)
     assert not path.exists()
     app.radio(key='zhs_reference').set_value('虚构待办（体验匹配）').run()
-    assert not app.exception and len(app.checkbox)==7
+    assert not app.exception and len([c for c in app.checkbox if c.key.startswith('zhs_review_')])==7
     assert not path.exists()
 
 
@@ -226,6 +226,46 @@ def test_production_write_needs_the_authorization_tick_and_then_works(tmp_path, 
     assert {'zhs_extension', 'zhs_source_links', 'zhs_import_receipts'} <= tables(formal)
     assert list(formal.parent.glob(formal.name + '.backups/*.sqlite3'))
     assert any('入库后 Deadline 看板（正式库）' in h.value for h in app.subheader)
+
+
+def test_manual_form_preserves_explicit_time_and_new_read_clears_old_edits(tmp_path, monkeypatch):
+    import json
+    from dataclasses import replace
+    from test_zhihuishu_import import real_read_report
+    from pku_deadline_agent.zhihuishu_validation import encode_report
+
+    formal = tmp_path / 'fictional.sqlite3'
+    TaskRepository(formal).initialize()
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    payload = tmp_path / 'payload.json'
+    monkeypatch.setenv('PKU_ZHIHUISHU_PAYLOAD', str(payload))
+    report = real_read_report()
+    payload.write_text(json.dumps(encode_report(report)), encoding='utf-8')
+    app = open_page()
+    assert '20:00' in app.text_input(key='zhs_review_edit_due_1').value
+    app.text_input(key='zhs_review_edit_title_1').input('虚构人工修正标题')
+    next(b for b in app.button if b.label == '应用补充 / 修改').click().run()
+    assert not app.exception
+    assert app.session_state['zhs_review_edits'][1].deadline == report.tasks[0].deadline
+    app.checkbox(key='zhs_review_prod_authorize').check().run()
+    # Exactly the same coverage/evidence, DIFFERENT task fields: repr() hides
+    # those fields, so the input fingerprint must use the complete dataclass.
+    changed = replace(report, tasks=(replace(report.tasks[0], title='虚构另一份读取'), report.tasks[1]))
+    payload.write_text(json.dumps(encode_report(changed)), encoding='utf-8')
+    app.run()
+    assert not app.exception
+    assert not app.checkbox(key='zhs_review_prod_authorize').value
+    assert app.text_input(key='zhs_review_edit_title_1').value == '虚构另一份读取'
+    assert 'zhs_review_edits' not in app.session_state
+
+
+def test_manual_form_empty_deadline_is_unknown_not_previous_value(setup):
+    app = open_page()
+    app.text_input(key='zhs_review_edit_due_1').input('')
+    next(b for b in app.button if b.label == '应用补充 / 修改').click().run()
+    assert not app.exception
+    assert app.session_state['zhs_review_edits'][1].deadline is None
+    assert any('截止日期或时刻缺失' in w.value for w in app.warning)
 
 
 def test_entering_preview_invalidates_other_page_approvals(setup):

@@ -123,6 +123,38 @@ def test_production_import_backs_up_writes_and_never_deletes(tmp_path, monkeypat
     assert len(repository.list_tasks(include_completed=True)) == 3
 
 
+def test_reopen_repository_and_review_again_require_manual_link_not_duplicate(tmp_path, monkeypatch):
+    """Restart persistence + a NEW read is separate from replaying one batch."""
+    formal = tmp_path / 'fictional-acceptance.sqlite3'
+    monkeypatch.setenv('PKU_DATABASE_PATH', str(formal))
+    repo = TaskRepository(formal)
+    repo.initialize()
+    absent = repo.add_task('虚构网格保留任务', '虚构其他课程', '作业', None, source='programming_grid')
+    target = ProductionImportTarget.open(formal, authorized=True)
+    report = real_read_report()  # Fictional contents with real-shaped provenance.
+    snapshot = build_review(report, repo.list_tasks(include_completed=True))
+    batch = prepare_import(target, snapshot, {1: ImportDecision('new', allow_distinct=True)})
+    receipt = apply_import(target, batch, confirmed=True, partial_confirmed=True)
+
+    reopened = TaskRepository(formal)
+    restarted_target = ProductionImportTarget.open(formal, authorized=True)
+    assert reopened.get_task(receipt.task_ids[0]).source == 'zhihuishu'
+    assert reopened.get_task(absent.id) == absent
+    assert apply_import(restarted_target, batch, confirmed=True, partial_confirmed=True).already_applied
+    fresh_snapshot = build_review(report, reopened.list_tasks(include_completed=True))
+    assert fresh_snapshot.items[0].category == '可能重复'
+    # The user selects the existing target and its local source association.
+    link_id = source_associations(restarted_target)[0]['local_id']
+    linked = prepare_import(restarted_target, fresh_snapshot,
+                            {1: ImportDecision('link', receipt.task_ids[0],
+                                               reopened.get_task(receipt.task_ids[0]).revision)},
+                            associations={1: link_id})
+    apply_import(restarted_target, linked, confirmed=True, partial_confirmed=True)
+    assert len(reopened.list_tasks(include_completed=True)) == 2
+    assert len(source_associations(restarted_target)) == 1
+    assert reopened.get_task(absent.id) == absent
+
+
 def test_production_import_rolls_back_when_the_reference_changed(tmp_path, monkeypatch):
     formal = tmp_path / 'formal.sqlite3'
     repository = TaskRepository(formal)

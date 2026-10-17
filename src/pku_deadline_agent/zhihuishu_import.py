@@ -1,4 +1,4 @@
-"""Explicit reviewed PARTIAL import. Currently enabled ONLY for marked sandboxes.
+"""Explicit reviewed PARTIAL import into a consented production target or sandbox.
 
 No browser, model, automatic matching or absence-based task changes. The ordinary
 sync trustworthy gate remains intact. Local UUIDs identify human associations,

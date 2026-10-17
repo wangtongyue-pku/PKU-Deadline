@@ -1,4 +1,4 @@
-"""Development preview UI. Every button is local/read-only or simulation-only."""
+"""Bounded read, local review and explicitly authorized partial import UI."""
 
 import sqlite3
 from dataclasses import asdict
@@ -97,6 +97,9 @@ def _manual_deadline(text):
 
 def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None):
     st.subheader('智慧树任务预览')
+    if report is None and import_target is None:
+        from pku_deadline_agent.zhihuishu_browser_page import render_browser_read
+        render_browser_read()
     sample, example_tasks = sample_review_data()
     if report is None:
         # Real reads land here by default; the fictional samples stay the fallback
@@ -107,6 +110,14 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                               key=PREFIX+'source', horizontal=True)
             report = latest if source == '最近一次真实读取' else None
     report = report if report is not None else sample
+    raw_digest = fingerprint(asdict(report))
+    if st.session_state.get('zhs_input_digest') != raw_digest:
+        # Corrections and permission belong to ONE raw read, not another course,
+        # a newer payload, or a fictional sample with the same row numbers.
+        for key in list(st.session_state):
+            if key.startswith(PREFIX+'edit_') or key in (PREFIX+'edits', PREFIX+'prod_authorize'):
+                del st.session_state[key]
+        st.session_state['zhs_input_digest'] = raw_digest
     edits = st.session_state.get(PREFIX+'edits') or {}
     try:
         effective = apply_edits(report, edits) if edits else report
@@ -246,12 +257,12 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                     columns[1].text_input('任务标题', value=item.task.title, key=f'{PREFIX}edit_title_{item.index}'),
                     columns[2].text_input('课程', value=item.task.course or '', key=f'{PREFIX}edit_course_{item.index}'),
                     columns[3].text_input('截止（如 2034.06.10 20:00）',
-                                          value=(item.task.deadline_date
-                                                 or (format_deadline(item.task.deadline)
-                                                     if item.task.deadline else '')),
+                                          value=(format_deadline(item.task.deadline) if item.task.deadline
+                                                 else (item.task.deadline_date or '')),
                                           key=f'{PREFIX}edit_due_{item.index}'),
-                    columns[4].selectbox('状态', ('未完成', '已完成'),
-                                         index=1 if item.task.status == '已完成' else 0,
+                    columns[4].selectbox('状态', ('未知', '未完成', '已完成'),
+                                         index=('未知', '未完成', '已完成').index(
+                                             item.task.status if item.task.status in ('未完成', '已完成') else '未知'),
                                          key=f'{PREFIX}edit_status_{item.index}'),
                 )
             if st.form_submit_button('应用补充 / 修改'):
@@ -260,7 +271,8 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                     for index, (title, course, due_text, status) in pending.items():
                         due, date_text = _manual_deadline(due_text)
                         collected[index] = ManualEdit(title=title.strip(), course=course.strip(),
-                                                      deadline=due, deadline_date=date_text, status=status)
+                                                      deadline=due, deadline_date=date_text if due else (date_text or ''),
+                                                      status=status)
                 except ValueError as error:
                     st.error(str(error))
                 else:
@@ -341,11 +353,12 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None)
                        '拟截止': format_deadline(op.target.due_at if op.action == 'link' else op.incoming.deadline),
                        '原因': op.reason or '人工预览选择'} for op in plan.operations], hide_index=True)
     else: st.caption('勾选候选并明确选择处理方式后，这里会列出模拟操作。')
-    st.caption('确认只检查当前方案，不代表已入库；修改选择、匹配、原因、数据或离开页面都会撤销模拟确认。')
-    if st.button('确认模拟方案（不会保存）', key=PREFIX+'confirm', disabled=not (plan and plan.operations)):
-        st.session_state[PREFIX+'confirmed'] = decision_digest
-    if st.session_state.get(PREFIX+'confirmed') == decision_digest:
-        st.success('模拟方案已核对。没有写入 SQLite、修改任务或调用 AI。')
+    if not production:
+        st.caption('确认只检查当前方案，不代表已入库；修改选择、匹配、原因、数据或离开页面都会撤销模拟确认。')
+        if st.button('确认模拟方案（不会保存）', key=PREFIX+'confirm', disabled=not (plan and plan.operations)):
+            st.session_state[PREFIX+'confirmed'] = decision_digest
+        if st.session_state.get(PREFIX+'confirmed') == decision_digest:
+            st.success('模拟方案已核对。没有写入 SQLite、修改任务或调用 AI。')
     if can_write:
         st.divider()
         st.subheader('人工确认入库（正式数据库）' if production else '人工确认入库（仅专用模拟库）')

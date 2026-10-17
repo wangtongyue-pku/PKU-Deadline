@@ -31,6 +31,7 @@ class ScrollPolicy:
     settle_rounds: int = 3
     wait_ms: int = 150
     max_seconds: int = 20
+    auto_container: bool = False  # Geometry only; never guess a platform selector.
 
     def __post_init__(self):
         if self.mode not in ('ordinary', 'lazy', 'virtual'):
@@ -41,6 +42,8 @@ class ScrollPolicy:
                 raise ValueError('滚动次数 / 等待 / 时间上限无效。')
         if type(self.boundary_verified) is not bool:
             raise ValueError('边界证据标记必须为布尔值。')
+        if type(self.auto_container) is not bool or (self.auto_container and self.container):
+            raise ValueError('自动定位滚动容器不能与指定容器混用。')
 
 
 @dataclass(frozen=True)
@@ -98,7 +101,16 @@ _CONTROLLER = r"""p => {
  const list=document.querySelector('.ant-tabs-tabpane-active .homework-content');
  const scope=list&&list.closest(p.course_scope);
  const names=scope?[...scope.querySelectorAll(p.course)]:[];
- const scroller=p.container?document.querySelector(p.container):document.scrollingElement;
+ // Inspect only ancestors of this exact list. Unrelated sidebars are irrelevant;
+ // multiple independently scrollable ancestors are ambiguous, so fail closed.
+ const ancestors=[];
+ if(p.auto_container&&list)for(let n=list;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){
+   const s=getComputedStyle(n);
+   if(/^(auto|scroll)$/.test(s.overflowY)&&n.scrollHeight>n.clientHeight+2&&n.clientHeight>0)ancestors.push(n);
+ }
+ if(ancestors.length>1)return null;
+ const scroller=p.container?document.querySelector(p.container):
+   (ancestors[0]||document.scrollingElement);
  if(!list||!scope||names.length!==1||!scroller||!scroller.contains(list)||
     (p.container&&document.querySelectorAll(p.container).length!==1)) return null;
  const name=names[0];
@@ -116,6 +128,7 @@ _CONTROLLER = r"""p => {
  const valid=()=>{
    const all=[...list.querySelectorAll('.homework-item')];
    if(dirty||!selectedView()||!list.isConnected||!scope.isConnected||!name.isConnected||
+      !scroller.isConnected||!scroller.contains(list)||
       list!==document.querySelector('.ant-tabs-tabpane-active .homework-content')||
       list.closest(p.course_scope)!==scope||scope.querySelectorAll(p.course).length!==1||
       scope.querySelector(p.course)!==name||all.length>1000)return false;
@@ -163,7 +176,8 @@ class BoundedScrollReader:
         if policy.mode != 'virtual' and profile.scan_position_attribute is not None:
             raise ReaderError('普通 / 懒加载列表使用受保护的本次 DOM 顺序，不混用虚拟位置。')
         params = dict(course_scope=profile.course_scope, course=profile.course, title=profile.title,
-                      deadline=profile.deadline, container=policy.container, end=policy.end, mode=policy.mode)
+                      deadline=profile.deadline, container=policy.container, end=policy.end, mode=policy.mode,
+                      auto_container=policy.auto_container)
         collected: dict[int, ReadTask] = {}
         seen: set[int] = set()
         reasons: list[str] = []

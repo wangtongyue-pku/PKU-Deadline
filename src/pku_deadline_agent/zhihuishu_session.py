@@ -41,6 +41,7 @@ class ReviewReadScope:
     container: str | None = None
     end: str | None = None
     boundary_verified: bool = False
+    auto_container: bool = False
 
     def __post_init__(self):
         if self.mode not in ('ordinary', 'lazy', 'virtual'):
@@ -51,6 +52,8 @@ class ReviewReadScope:
                 raise ValueError(f'读取范围无效：{name} 必须为 1–{upper}。')
         if type(self.boundary_verified) is not bool:
             raise ValueError('边界证据标记必须为布尔值。')
+        if type(self.auto_container) is not bool or (self.auto_container and self.container):
+            raise ValueError('自动定位与指定滚动容器不能混用。')
 
 
 def read_list_for_review(page, profile: ListProfile, *, scope: ReviewReadScope = ReviewReadScope(),
@@ -61,12 +64,13 @@ def read_list_for_review(page, profile: ListProfile, *, scope: ReviewReadScope =
     The result is a standardized :class:`ScrollReport` — the same shape the
     review page renders and the sandbox import validates. Its ``evidence`` field
     records where the data came from: fictional pages read as ``synthetic*``,
-    authorized real pages as ``authorized-real-*``. Only fictional evidence may
-    ever reach an import; real evidence previews and stops.
+    authorized real pages as ``authorized-real-*``. The separate reviewed import
+    contract pairs fictional evidence with sandboxes, real evidence with an
+    explicitly authorized production target; this function never writes.
     """
     reader = BoundedTaskListReader(profile, limit=scope.max_tasks)
     policy = ScrollPolicy(mode=scope.mode, container=scope.container, end=scope.end,
                           boundary_verified=scope.boundary_verified,
-                          max_scrolls=scope.max_scrolls)
+                          max_scrolls=scope.max_scrolls, auto_container=scope.auto_container)
     return BoundedScrollReader(reader, policy).read(
         page, allow_real=allow_real, validation_only=validation_only)

@@ -106,8 +106,8 @@ def apply_edits(report: ScrollReport, edits) -> ScrollReport:
         if edit.deadline_date is not None or edit.deadline is not None:
             deadline, date_text = edit.deadline, (_text(edit.deadline_date, 80) or None)
         status = task.status if edit.status is None else edit.status
-        if status not in ('未完成', '已完成'):
-            raise ValueError('平台状态只能是未完成或已完成。')
+        if status not in ('未知', '未完成', '已完成'):
+            raise ValueError('平台状态只能是未知、未完成或已完成。')
         if deadline is not None:
             normalize_datetime(deadline)
         tasks.append(replace(task, title=title, course=course, deadline=deadline,

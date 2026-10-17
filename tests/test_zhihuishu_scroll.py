@@ -49,6 +49,45 @@ def test_document_scroll_keeps_verified_visible_course_binding(page):
     assert all(t.course=='虚构滚动课程' for t in result.tasks)
 
 
+@pytest.mark.parametrize('document', [False, True])
+def test_auto_container_uses_list_ancestors_and_preserves_pairing(page, document):
+    prepare(page, count=5, document=document)
+    # An unrelated scrolling sidebar must never be selected or moved.
+    page.evaluate("""()=>{const e=document.createElement('aside');
+        e.id='unrelated'; e.style.cssText='position:fixed;right:0;top:0;height:80px;overflow:auto';
+        e.innerHTML='<div style="height:900px">虚构侧栏</div>';document.body.append(e);} """)
+    result = BoundedScrollReader(BoundedTaskListReader(PROFILE), ScrollPolicy(
+        auto_container=True, boundary_verified=True, max_scrolls=12, wait_ms=50)).read(page)
+    assert result.coverage.complete, result.coverage
+    assert [(t.title, t.deadline.day) for t in result.tasks] == [
+        (f'虚构滚动任务{i}', i) for i in range(1, 6)]
+    assert page.eval_on_selector('#unrelated', 'e=>e.scrollTop') == 0
+    assert page.evaluate('sideEffects') == 0
+
+
+def test_auto_container_ambiguous_nested_scroll_stops(page):
+    prepare(page, count=5)
+    page.eval_on_selector('.ant-tabs-tabpane-active',
+                         "e=>e.style.cssText='height:180px;overflow:auto'")
+    result = BoundedScrollReader(BoundedTaskListReader(PROFILE),
+                                 ScrollPolicy(auto_container=True)).read(page)
+    assert not result.tasks
+    assert 'source_or_structure_changed' in result.coverage.reasons
+
+
+def test_auto_container_retains_round_task_and_move_caps(page):
+    prepare(page, count=9)
+    result = BoundedScrollReader(BoundedTaskListReader(PROFILE, limit=3), ScrollPolicy(
+        auto_container=True, max_scrolls=12, wait_ms=50)).read(page)
+    assert result.coverage.observed_count <= 3 and len(result.tasks) <= 3
+    assert 'task_limit' in result.coverage.reasons
+    prepare(page, count=5)
+    limited = BoundedScrollReader(BoundedTaskListReader(PROFILE), ScrollPolicy(
+        auto_container=True, max_scrolls=1, wait_ms=50)).read(page)
+    assert limited.coverage.scroll_count == 1 and not limited.coverage.complete
+    assert 'scroll_limit' in limited.coverage.reasons
+
+
 def test_tall_cards_merge_only_fragments_from_same_position(page):
     prepare(page,count=3,tall=True)
     result=collect(page)
