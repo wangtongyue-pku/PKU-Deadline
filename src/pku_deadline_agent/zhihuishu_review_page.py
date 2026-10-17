@@ -162,8 +162,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
         st.info(f'数据来源：{origin}，来自一次获你单独授权的有界读取。'
                 f'在本地核对任务，不再访问{label}或调用 AI；确认写入前不会修改任务库。')
     if source == 'pku_yuetang':
-        st.caption('平台状态未知时仍可人工新增本地待办；不表示平台已完成或未完成。'
-                   '来源链接为课程列表入口，并非作业详情；未采集正文、附件或私人认证参数。')
+        st.caption('来源链接为课程列表入口，并非作业详情；未采集正文、附件或私人认证参数。')
     write_mode = False
     associations_available = ()
     if import_target is not None:
@@ -239,7 +238,7 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
     st.caption('本地任务包含已完成项，排除回收站；平台状态不会改动本地完成状态。当前对比只使用任务字段，不读取通知正文。')
     if source == 'pku_yuetang':
         st.caption(f'已隐藏 {len(snapshot.items)-len(visible_items)} 项已提交作业；'
-                   '未提交和逾期未提交继续显示，未知状态保留待核对。筛选不删除任务、不修改完成状态。')
+                   '筛选不删除任务、不修改完成状态。')
     coverage = report.coverage
     if coverage.complete:
         st.success(f'{origin}：范围和字段已验证完整；保存前请核对选中任务。')
@@ -327,9 +326,15 @@ def render_zhihuishu_preview_page(path=None, *, report=None, import_target=None,
         selected = st.checkbox(f'选择候选 {item.index} · {item.category}', key=f'{PREFIX}pick_{item.index}')
         with st.expander(f'候选 {item.index}：详情与人工匹配', expanded=selected):
             st.text(item.task.title or '标题缺失')
-            st.text(f'课程：{item.task.course or "待确认"}；截止：{format_deadline(item.task.deadline)}；状态：{item.task.status or "未知"}')
+            details = f'课程：{item.task.course or "待确认"}；截止：{format_deadline(item.task.deadline)}'
+            if source != 'pku_yuetang':
+                details += f'；状态：{item.task.status or "未知"}'
+            st.text(details)
             st.text(f'原始日期文字：{item.task.deadline_date or "未提供"}；来源链接：{item.task.source_url or "未提供"}')
-            for warning in item.warnings: st.warning(warning)
+            for warning in item.warnings:
+                if source == 'pku_yuetang' and warning == '平台完成状态未知':
+                    continue
+                st.warning(warning)
             if item.batch_peers:
                 st.warning('同批还有同名候选：' + '、'.join(map(str, item.batch_peers)) + '；不得自动合并。')
             if item.matches:

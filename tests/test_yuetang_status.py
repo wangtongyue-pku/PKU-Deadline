@@ -80,6 +80,8 @@ def test_default_hidden_submitted_with_stable_indices_and_no_writes(tmp_path,mon
     frame=app.dataframe[0].value
     assert list(frame['编号'])==[2,3,4]
     assert '平台状态' not in frame.columns
+    assert not any('平台完成状态未知' in warning.value for warning in app.warning)
+    assert not any('状态：未知' in item.value for item in app.text)
     assert list(frame['任务标题'])==['虚构未交近期任务','虚构逾期未交任务','虚构未知提交任务']
     assert {c.key for c in app.checkbox if c.key.startswith('zhs_review_pick_')}=={
         'zhs_review_pick_2','zhs_review_pick_3','zhs_review_pick_4'}
