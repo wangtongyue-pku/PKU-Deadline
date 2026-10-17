@@ -29,9 +29,10 @@ from pku_deadline_agent.zhihuishu_reader import FLIPPED_HOMEWORK_LIST_PATH, REAL
 
 OUT = ROOT / '.local-tmp' / 'zhs-sessions' / str(uuid.uuid4())
 PROFILE = OUT / 'profile'
-# The one address the reader's validation mode is allowed to read. The script
-# opens it directly so the operator and the script are looking at the same page.
-ENTRY = 'https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/'
+# Start at the public portal, NOT a course-bound child route without course ID.
+# The operator logs in and selects their course. The reader's separate URL gate
+# still accepts only the observed homework list; the portal itself is not read.
+ENTRY = 'https://onlineweb.zhihuishu.com/'
 TRIGGERS = ('read.request', 'retry.request')
 MAX_TASKS, MAX_SCROLLS = 5, 1
 SESSION_SECONDS = 15 * 60
@@ -185,7 +186,9 @@ def list_targets(context):
 
 def watch(context) -> None:
     snapshot = []
-    for kind, target in list_targets(context):
+    # URL SHAPES only, including non-list tabs, so missing/wrong windows can be
+    # diagnosed without probing their DOM, queries, identifiers or credentials.
+    for kind, target in targets(context):
         try:
             snapshot.append(url_shape(target.url) | {'kind': kind})
         except Exception:                        # noqa: BLE001
@@ -193,6 +196,19 @@ def watch(context) -> None:
     with (OUT / 'watch.log').open('a', encoding='utf-8') as handle:
         handle.write(f'{time.strftime("%H:%M:%S")} targets={len(snapshot)} '
                      f'{json.dumps(snapshot, ensure_ascii=False)}\n')
+
+
+def pump_events(context, milliseconds=500):
+    """Dispatch navigation/new-tab events without reading DOM or clicking.
+
+    Playwright's synchronous API dispatches events during API calls. Python
+    time.sleep leaves cached Page.url/context.pages stale after manual login.
+    """
+    for page in context.pages:
+        if not page.is_closed():
+            page.wait_for_timeout(milliseconds)
+            return
+    raise RuntimeError('temporary browser closed')
 
 
 def probe(context) -> list:
@@ -227,7 +243,7 @@ def wait_for_render(context, seconds=RENDER_WAIT_SECONDS):
         nodes = first_nodes(context)
         if nodes and nodes.get('homework_items', 0) > 0:
             return nodes
-        time.sleep(2)
+        pump_events(context)
     return nodes
 
 
@@ -299,10 +315,11 @@ def _run() -> int:
                     if all(p.is_closed() for p in context.pages):
                         status('browser-closed-by-operator')
                         return 1
+                    pump_events(context)
                     watch(context)
-                    time.sleep(2)
 
                 read, profile, scope, encode, summarize = readers(reload=attempt > 1)
+                pump_events(context, 50)
                 if len(list_targets(context)) != 1:
                     status('multiple-or-missing-lists: keep exactly one target list open')
                     continue

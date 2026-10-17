@@ -107,6 +107,7 @@ def test_probes_never_inspect_login_exam_or_encoded_routes():
         main_frame = None
         def __init__(self, url): self.url = url
         def is_closed(self): return False
+        def wait_for_timeout(self, milliseconds): pass
         def evaluate(self, *args): touched.append(self.url); return {'homework_items': 1}
     base = 'https://wenda.zhihuishu.com'
     pages = [Page(base + path) for path in (
@@ -126,12 +127,13 @@ def test_cancel_or_failure_after_read_discards_result_without_second_read(tmp_pa
     (tmp_path / 'read.request').touch()
     calls = []
     class Page:
-        url = worker.ENTRY
+        url = 'https://' + worker.REAL_HOST + worker.FLIPPED_HOMEWORK_LIST_PATH
         frames = ()
         main_frame = None
         def close(self): pass
         def goto(self, *args, **kw): pass
         def is_closed(self): return False
+        def wait_for_timeout(self, milliseconds): pass
     ctx = SimpleNamespace(pages=[Page()], new_page=Page, close=lambda: calls.append('close'))
     pw = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=lambda **kw: ctx))
     class Playwright:
@@ -152,6 +154,29 @@ def test_cancel_or_failure_after_read_discards_result_without_second_read(tmp_pa
     assert calls == ['read', 'close']
     assert not (tmp_path / 'report.json').exists()
     assert not worker.PROFILE.exists()
+
+
+def test_wait_dispatches_manual_navigation_without_reading_dom(tmp_path):
+    worker = worker_module()
+    worker.OUT = tmp_path
+    calls = []
+    class Page:
+        def is_closed(self): return False
+        def wait_for_timeout(self, milliseconds): calls.append(milliseconds)
+        def evaluate(self, *args): raise AssertionError('waiting must not read DOM')
+    worker.pump_events(SimpleNamespace(pages=[Page()]))
+    assert calls == [500]
+    with pytest.raises(RuntimeError):
+        worker.pump_events(SimpleNamespace(pages=[]))
+
+
+def test_start_at_public_portal_not_a_course_route_without_id():
+    worker = worker_module()
+    assert worker.ENTRY == 'https://onlineweb.zhihuishu.com/'
+    assert worker.FLIPPED_HOMEWORK_LIST_PATH not in worker.ENTRY
+    # Public entry/login pages remain outside the task read/probe gate.
+    page = SimpleNamespace(url=worker.ENTRY, frames=(), main_frame=None, is_closed=lambda: False)
+    assert worker.list_targets(SimpleNamespace(pages=[page])) == []
 
 
 SCRIPT = '''from pku_deadline_agent.zhihuishu_browser_page import render_browser_read
