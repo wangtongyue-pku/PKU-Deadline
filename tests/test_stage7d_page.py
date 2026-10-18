@@ -99,7 +99,8 @@ def metrics(app):
 
 def test_sidebar_offers_the_mailbox_page(repo, monkeypatch):
     app = open_page(repo, monkeypatch, page="手动待办")
-    assert "学校邮箱" in app.sidebar.radio[0].options
+    # The sidebar labels carry an icon prefix now, so match on the name inside.
+    assert any("学校邮箱" in str(option) for option in app.sidebar.radio[0].options)
 
 
 def test_page_opens_with_demo_mode_and_connection_controls(repo, monkeypatch):

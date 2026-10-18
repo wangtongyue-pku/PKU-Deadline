@@ -4,6 +4,7 @@ from datetime import datetime
 
 import streamlit as st
 
+from pku_deadline_agent import reminder_control
 from pku_deadline_agent.database import TaskChanged
 from pku_deadline_agent.models import TASK_TYPES
 from pku_deadline_agent.reminders import parse_hours, preview_due
@@ -273,6 +274,35 @@ def _render_history(repository, task) -> None:
                    "原因": row["reason"], "通知来源": SOURCE_LABELS.get(row["source"], row["source"]), "通知指纹": row["notice_hash"][:12] or "手动 / 旧版本"} for row in records], hide_index=True, use_container_width=True)
 
 
+def _render_reminder_process(repository) -> None:
+    """One switch for the reminder process, instead of asking for a PowerShell window."""
+    st.markdown("**提醒进程**")
+    state = reminder_control.status()
+    if state.running:
+        started = reminder_control.describe(state.started_at)
+        st.success(f"提醒进程运行中（pid {state.pid}" + (f"，启动于 {started}" if started else "") + "）。")
+    else:
+        st.info("提醒进程未运行：不开它就不会弹窗。点下面的「启动提醒」即可，不必再开 PowerShell。")
+    left, right = st.columns(2)
+    if left.button("启动提醒", key="reminder_start", disabled=state.running, type="primary"):
+        try:
+            started = reminder_control.start()
+        except (OSError, ValueError):
+            st.error("启动提醒进程失败，请检查本地 Python 和数据库权限。")
+        else:
+            if started.running:
+                st.success(f"已启动提醒进程（pid {started.pid}）。关闭网页不会停止它。")
+            else:
+                st.warning("已尝试启动，但进程没有在运行；请检查项目依赖后重试。")
+            st.rerun()
+    if right.button("停止提醒", key="reminder_stop", disabled=not state.running):
+        stopped = reminder_control.stop()
+        st.success("已停止提醒进程。" if stopped else "提醒进程已经不在运行。")
+        st.rerun()
+    st.caption("这是本机手动开关：不写入 Windows 计划任务、不随开机启动、不需要管理员权限。"
+               "用右边的「停止提醒」或关闭该进程即可结束。")
+
+
 def render_reminder_settings(repository):
     st.subheader("提醒与备份")
     st.info("提醒由独立 Python 进程检查，不会因关闭网页而停止。仅打开此页面不会启动提醒。")
@@ -289,7 +319,8 @@ def render_reminder_settings(repository):
         else:
             st.success("提醒配置已保存。")
     st.caption("提醒进程最近检查（北京）：" + (format_deadline(datetime.fromisoformat(config["last_check_at"])) if config["last_check_at"] else "尚无记录"))
-    st.write("在另一个 PowerShell 窗口、项目目录中运行（无需配置 API Key）：")
+    _render_reminder_process(repository)
+    st.write("或者你自己在另一个 PowerShell 窗口、项目目录中运行（无需配置 API Key）：")
     path = str(repository.path.resolve()).replace("'", "''")
     command = f".\\.venv\\Scripts\\python.exe -m pku_deadline_agent.reminders --database '{path}'"
     st.code(command + " --dry-run --once\n# 正式运行，保持窗口开启；Ctrl+C 停止\n" + command + " --notify", language="powershell")

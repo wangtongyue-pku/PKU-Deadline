@@ -93,7 +93,8 @@ def _click(app, key):
 
 def test_sidebar_offers_the_ai_settings_page(backend, monkeypatch):
     app = open_page(backend, monkeypatch)
-    assert "AI 设置" in app.sidebar.radio[0].options
+    # The sidebar labels carry an icon prefix now, so match on the name inside.
+    assert any("AI 设置" in str(option) for option in app.sidebar.radio[0].options)
     assert not app.exception, app.exception
 
 

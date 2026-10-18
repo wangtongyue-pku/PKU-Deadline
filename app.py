@@ -19,6 +19,26 @@ from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin
 from pku_deadline_agent.zhihuishu_review_page import invalidate_review, render_zhihuishu_preview_page
 
 
+# Ordered as 任务 / 导入 / 设置 so related entries sit together; the option values
+# are unchanged, which keeps bookmarks, tests and keyboard use working.
+NAV_PAGES = (
+    "手动待办",
+    "编程网格导入", "学校邮箱", "智慧树任务预览", "问学阅堂",
+    "通知隐私预览", "Deadline 智能解析", "提醒与备份", "AI 设置",
+)
+NAV_ICONS = {
+    "手动待办": "📋",
+    "编程网格导入": "📥",
+    "学校邮箱": "📬",
+    "智慧树任务预览": "🎓",
+    "问学阅堂": "📚",
+    "通知隐私预览": "🧪",
+    "Deadline 智能解析": "🧠",
+    "提醒与备份": "🔔",
+    "AI 设置": "⚙️",
+}
+
+
 def main() -> None:
     st.set_page_config(page_title="PKU Deadline", page_icon="📅", layout="wide")
     # One slim header instead of a 48px title + caption on every page: the page's
@@ -32,8 +52,9 @@ def main() -> None:
         unsafe_allow_html=True)
 
     with st.sidebar:
-        page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入",
-                                 "学校邮箱", "智慧树任务预览", "问学阅堂", "AI 设置", "提醒与备份"), key="page")
+        page = st.radio("功能", NAV_PAGES, key="page",
+                        format_func=lambda value: f"{NAV_ICONS[value]} {value}")
+        st.caption("① 任务 ｜ ② 导入（四个来源） ｜ ③ 设置与工具")
         st.divider()
         with st.expander("这个程序做什么", expanded=False):
             st.write(

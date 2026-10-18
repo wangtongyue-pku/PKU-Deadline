@@ -11,7 +11,7 @@ import os
 
 import streamlit as st
 
-from pku_deadline_agent import grid_session
+from pku_deadline_agent import grid_courses, grid_session
 from pku_deadline_agent.grid_session import (
     SessionAuthRequired,
     SessionBrowserUnavailable,
@@ -141,7 +141,17 @@ def _render_sync_section(repository) -> None:
             "安装前请先确认你已经同意添加这个可选依赖。手动导入始终可用。"
         )
 
+    remembered = grid_courses.known()
     default_id = os.environ.get(COURSE_ID_ENV, "").strip()
+    if remembered:
+        labels = {course.course_id: course for course in remembered}
+        # Pre-fill helper, never a replacement: the text field stays available for a
+        # course you have not synced yet.
+        st.selectbox(
+            "从同步过的课程选择（可选）", [""] + list(labels), key="grid_course_pick",
+            format_func=lambda value: "不选，手动填写下面的编号" if not value else labels[value].display(),
+            on_change=_prefill_course, help="编号只存在本机；选好后会填进下面的输入框。",
+        )
     course_id = st.text_input(
         "课程编号（课程页地址中 /course/ 后面的 32 位十六进制）",
         value=default_id, key="grid_sync_course",
@@ -217,10 +227,31 @@ def _run_sync(repository, course_id: str) -> None:
     # Success does change the plan, so the preview must be rendered by a run whose
     # widget keys match the new generation.
     _forget()
+    _remember_course(course_id.strip(), outcome.documents)
     st.session_state["grid_plan"] = plan
     st.session_state["grid_source"] = "sync"
     st.success(f"同步完成：{describe_plan(plan)}。请核对后确认写入。")
 
+
+
+def _prefill_course() -> None:
+    """Copy the picked course id into the text field (runs before it is created)."""
+    picked = st.session_state.get("grid_course_pick")
+    if picked:
+        st.session_state["grid_sync_course"] = picked
+
+
+def _remember_course(course_id: str, documents) -> None:
+    """Best effort: pre-filling a form must never break a successful sync."""
+    label = ""
+    for document in documents:
+        label = (getattr(document, "course", "") or getattr(document, "title", "") or "").strip()
+        if label:
+            break
+    try:
+        grid_courses.remember(course_id, label)
+    except (OSError, ValueError):
+        pass
 
 
 def _browser_available() -> bool:

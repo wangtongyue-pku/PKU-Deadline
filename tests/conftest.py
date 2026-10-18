@@ -11,6 +11,9 @@ def isolate_real_credentials(monkeypatch, tmp_path):
     # accident. Tests that exercise it point the variable at their own copy.
     monkeypatch.setenv("PKU_ZHIHUISHU_PAYLOAD", str(tmp_path / "no-real-payload.json"))
     monkeypatch.setenv("PKU_YUETANG_PAYLOAD", str(tmp_path / "no-yuetang-payload.json"))
+    # Remembered grid courses are local user data too: never read or overwrite the
+    # real list from a test.
+    monkeypatch.setenv("PKU_GRID_COURSES", str(tmp_path / "no-grid-courses.json"))
     try:
         from keyring.backends.Windows import WinVaultKeyring
     except ImportError:

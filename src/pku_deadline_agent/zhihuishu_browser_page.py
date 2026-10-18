@@ -71,26 +71,31 @@ def render_browser_read(source="zhihuishu"):
     label, _ = platform(source)
     prefix = "yue_browser_" if source=="pku_yuetang" else "zhs_browser_"
     job_key = prefix+"job"
-    st.markdown(f"**从{label}读取作业**")
     if message := st.session_state.pop(prefix+'message', None):
         st.success(message)
     if job_key not in st.session_state:
-        st.caption('本人登录临时浏览器，准备好后再读取；不进入任务、考试或视频，不调用 AI，不写任务库。'
-                   '读取结果仅在本机保存用于审核；退出会清理本次临时登录状态。等待超过 15 分钟自动退出。')
-        with st.expander('读取范围', expanded=False):
-            tasks = st.number_input('本次最多读取任务数', min_value=1, max_value=20, value=20 if source=='pku_yuetang' else 5,
-                                    key=prefix+'tasks')
-            scrolls = st.number_input('本次最多滚动次数（含回到顶部）', min_value=1, max_value=12, value=12,
-                                      key=prefix+'scrolls')
-        generation = st.session_state.get(prefix+'generation', 0)
-        consent = st.checkbox(f'我同意本次只读一门课的作业列表，优先未完成，最多 {tasks} 项 / {scrolls} 次滚动',
-                              key=f'{prefix}consent_{tasks}_{scrolls}_{generation}')
-        if st.button(f'读取{label}', disabled=not consent, key=prefix+'start', type='primary'):
-            try:
-                st.session_state[job_key] = BrowserRead.start(
-                    authorized=consent, max_tasks=int(tasks), max_scrolls=int(scrolls), source=source)
-                st.session_state[prefix+'generation'] = generation + 1
-            except (OSError, ValueError, PermissionError):
-                st.error('无法启动临时浏览器，请检查本地浏览器和 Playwright 是否已安装。')
-            st.rerun()
+        # One card holds the whole start flow: what it does, the range, the consent
+        # and the button - instead of a paragraph, a checkbox and a dead button.
+        with st.container(border=True):
+            st.markdown(f"#### 从{label}读取作业")
+            st.caption('由你本人登录临时浏览器；只读列表里的标题 / 课程 / 截止 / 状态，'
+                       '不进入任务、考试或视频，不写任务库，不调用 AI。')
+            with st.expander('读取范围与安全说明'):
+                tasks = st.number_input('本次最多读取任务数', min_value=1, max_value=20, value=20 if source=='pku_yuetang' else 5,
+                                        key=prefix+'tasks')
+                scrolls = st.number_input('本次最多滚动次数（含回到顶部）', min_value=1, max_value=12, value=12,
+                                          key=prefix+'scrolls')
+                st.caption('读取结果只在本机保存用于审核；退出会清理本次临时登录状态，'
+                           '等待超过 15 分钟自动退出。')
+            generation = st.session_state.get(prefix+'generation', 0)
+            consent = st.checkbox(f'我同意本次只读一门课的作业列表，优先未完成，最多 {tasks} 项 / {scrolls} 次滚动',
+                                  key=f'{prefix}consent_{tasks}_{scrolls}_{generation}')
+            if st.button(f'读取{label}', disabled=not consent, key=prefix+'start', type='primary'):
+                try:
+                    st.session_state[job_key] = BrowserRead.start(
+                        authorized=consent, max_tasks=int(tasks), max_scrolls=int(scrolls), source=source)
+                    st.session_state[prefix+'generation'] = generation + 1
+                except (OSError, ValueError, PermissionError):
+                    st.error('无法启动临时浏览器，请检查本地浏览器和 Playwright 是否已安装。')
+                st.rerun()
     _progress(source)
