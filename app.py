@@ -15,6 +15,7 @@ from pku_deadline_agent.parse_page import invalidate_parse, render_parse_page
 from pku_deadline_agent.time_utils import BEIJING, beijing_now, format_deadline
 from pku_deadline_agent.extraction import ExtractedTask
 from pku_deadline_agent.management_page import render_import_choice, render_task_board, render_reminder_settings
+from pku_deadline_agent.week_page import render_week_view
 from pku_deadline_agent.task_management import ImportDecision, NoticeOrigin
 from pku_deadline_agent.zhihuishu_review_page import invalidate_review, render_zhihuishu_preview_page
 
@@ -22,12 +23,13 @@ from pku_deadline_agent.zhihuishu_review_page import invalidate_review, render_z
 # Ordered as 任务 / 导入 / 设置 so related entries sit together; the option values
 # are unchanged, which keeps bookmarks, tests and keyboard use working.
 NAV_PAGES = (
-    "手动待办",
+    "手动待办", "周视图",
     "编程网格导入", "学校邮箱", "智慧树任务预览", "问学阅堂",
     "通知隐私预览", "Deadline 智能解析", "提醒与备份", "AI 设置",
 )
 NAV_ICONS = {
     "手动待办": "📋",
+    "周视图": "🗓",
     "编程网格导入": "📥",
     "学校邮箱": "📬",
     "智慧树任务预览": "🎓",
@@ -40,7 +42,7 @@ NAV_ICONS = {
 # Short, stable slugs so ?page=zhihuishu can be bookmarked; the Chinese page names
 # stay the single source of truth everywhere else.
 PAGE_SLUGS = {
-    "manual": "手动待办", "grid": "编程网格导入", "mail": "学校邮箱",
+    "manual": "手动待办", "week": "周视图", "grid": "编程网格导入", "mail": "学校邮箱",
     "zhihuishu": "智慧树任务预览", "yuetang": "问学阅堂",
     "notice": "通知隐私预览", "parse": "Deadline 智能解析",
     "reminders": "提醒与备份", "ai": "AI 设置",
@@ -48,7 +50,7 @@ PAGE_SLUGS = {
 SLUG_BY_PAGE = {page: slug for slug, page in PAGE_SLUGS.items()}
 # Pages that already open the database may offer quick add; the platform pages
 # deliberately render before any database initialize, so they never do.
-QUICK_ADD_PAGES = ("手动待办", "编程网格导入", "学校邮箱", "提醒与备份")
+QUICK_ADD_PAGES = ("手动待办", "周视图", "编程网格导入", "学校邮箱", "提醒与备份")
 
 
 def page_from_query(value) -> str | None:
@@ -234,6 +236,18 @@ def main() -> None:
             render_email_page(repository)
         except (sqlite3.Error, OSError, RuntimeError):
             st.error("读取或写入本地数据库失败，请检查权限和可用空间。")
+        return
+    if page == "周视图":
+        repository = TaskRepository(database_path())
+        try:
+            repository.initialize()
+        except (sqlite3.Error, OSError, RuntimeError):
+            st.error("无法打开数据库：请检查本地文件权限、可用空间和程序版本。")
+            st.stop()
+        try:
+            render_week_view(repository)
+        except (sqlite3.Error, OSError):
+            st.error("读取失败，请检查本地数据库。")
         return
     if page == "AI 设置":
         # No repository: this page manages a credential, not task data.
