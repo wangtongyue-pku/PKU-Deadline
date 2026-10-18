@@ -137,7 +137,13 @@ def test_same_task_appears_on_existing_deadline_board_after_import(setup,monkeyp
     monkeypatch.setenv('PKU_DATABASE_PATH',str(target.path))
     app = AppTest.from_file(Path(__file__).resolve().parents[1]/'app.py',default_timeout=15).run()
     assert not app.exception
-    assert any(receipt.task_ids[0] in list(df.value.get('编号',[])) for df in app.dataframe)
+    # The board no longer shows a numeric id column, so check the imported task by
+    # its title in the table and by id in the task picker below it.
+    imported = repo.get_task(receipt.task_ids[0])
+    assert any(imported.title in list(df.value.get('标题', [])) for df in app.dataframe)
+    # The picker formats options as "#<id> <title>", so match that shape.
+    assert any(str(option).startswith(f"#{receipt.task_ids[0]} ")
+               for option in app.selectbox(key='board_task').options)
 
 
 def test_production_app_has_no_active_write_or_mode_switch(setup,monkeypatch):

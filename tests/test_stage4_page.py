@@ -115,6 +115,27 @@ def test_board_course_type_status_and_sorting_filters(setup):
     assert app.dataframe[0].value["标题"].tolist() == ["虚构考试"]
 
 
+def test_board_quick_filter_reset_and_visible_status_column(setup):
+    """The board must stay readable: status visible, and one click to narrow by urgency."""
+    app, repo = setup
+    repo.add_task("虚构过期", "甲", due_at=NOW - timedelta(days=1))
+    repo.add_task("虚构临近", "甲", due_at=NOW + timedelta(hours=2))
+    repo.add_task("虚构三天内", "甲", due_at=NOW + timedelta(days=2))
+    repo.add_task("虚构未知", "甲")
+    app.run()
+    # Four columns only: the status must never be pushed off-screen by an id column.
+    assert list(app.dataframe[0].value.columns) == ["标题", "课程 / 活动", "截止时间（北京）", "状态"]
+    assert app.dataframe[0].value["状态"].tolist() == ["已过期", "3小时内", "3天内", "待确认"]
+    app.segmented_control(key="board_quick").set_value("已过期").run()
+    assert app.dataframe[0].value["标题"].tolist() == ["虚构过期"]
+    app.button(key="board_reset").click().run()
+    assert app.dataframe[0].value["标题"].tolist() == ["虚构过期", "虚构临近", "虚构三天内", "虚构未知"]
+    # The quick filter stacks with the three selectboxes instead of replacing them.
+    app.selectbox(key="board_type").set_value("作业").run()
+    app.segmented_control(key="board_quick").set_value("3 天内").run()
+    assert app.dataframe[0].value["标题"].tolist() == ["虚构三天内"]
+
+
 def test_parsed_extension_updates_only_after_target_and_final_confirmation(setup):
     app, repo = setup
     old_due = datetime(2026, 10, 13, 20, tzinfo=BEIJING)

@@ -332,12 +332,13 @@ def _render_status(dependencies: EmailPageDependencies) -> None:
         state = "已保存（Windows 凭据管理器）" if credentials is not None else "未提供凭据"
     else:
         state = "演示收件箱"
-    columns = st.columns(4)
-    columns[0].metric("连接状态", "已连接" if connected else "未连接")
-    columns[1].metric("凭据状态", state)
+    # Two rows of two so long values (credential backend, timestamps) are not clipped.
+    top, bottom = st.columns(2), st.columns(2)
+    top[0].metric("连接状态", "已连接" if connected else "未连接")
+    top[1].metric("凭据状态", state)
     last = _last_sync_at()
-    columns[2].metric("上次同步", format_deadline(last).replace("北京时间 ", "") if last else "尚未同步")
-    columns[3].metric("本次邮件数", str(len(report.analyses)) if report else "—")
+    bottom[0].metric("上次同步", format_deadline(last).replace("北京时间 ", "") if last else "尚未同步")
+    bottom[1].metric("本次邮件数", str(len(report.analyses)) if report else "—")
     if report is not None:
         detail = [f"模式 {report.mode}", f"UIDVALIDITY {report.uidvalidity}",
                   f"最高 UID {report.highest_uid}"]

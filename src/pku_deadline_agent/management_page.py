@@ -97,6 +97,14 @@ GROUP_HINT = {
 }
 
 
+def _reset_board_filters(default_status: str) -> None:
+    """Clear every board filter. Runs as a callback, before the widgets re-run."""
+    st.session_state["board_category"] = "全部"
+    st.session_state["board_type"] = "全部"
+    st.session_state["board_status"] = default_status
+    st.session_state["board_quick"] = "全部"
+
+
 def render_task_board(repository):
     st.subheader("待办列表")
     all_tasks = repository.list_tasks(include_completed=True, include_deleted=True)
@@ -105,30 +113,55 @@ def render_task_board(repository):
         return
     recycle = st.checkbox("查看回收站", key="board_recycle")
     tasks = [task for task in all_tasks if bool(task.deleted_at) == recycle]
-    left, middle, right = st.columns(3)
-    category = left.selectbox("课程筛选", ["全部", *sorted({task.category for task in tasks})], format_func=lambda value: value or "未分类", key="board_category")
-    kind = middle.selectbox("类型筛选", ("全部", *TASK_TYPES), key="board_type")
-    status = right.selectbox("状态筛选", ("未完成", "全部", "已完成", "已过期") if not recycle else ("全部", "未完成", "已完成"), key="board_status")
     now = beijing_now()
+    category_column, kind_column, status_column, order_column = st.columns([2, 1.5, 1.5, 1.7])
+    category = category_column.selectbox("课程筛选", ["全部", *sorted({task.category for task in tasks})], format_func=lambda value: value or "未分类", key="board_category")
+    kind = kind_column.selectbox("类型筛选", ("全部", *TASK_TYPES), key="board_type")
+    status = status_column.selectbox("状态筛选", ("未完成", "全部", "已完成", "已过期") if not recycle else ("全部", "未完成", "已完成"), key="board_status")
+    order = order_column.selectbox("截止时间排序", ("由近到远", "由远到近"), key="board_order")
     selected = filter_tasks(tasks, category=category, task_type=kind, status=status, now=now)
-    order = st.selectbox("截止时间排序", ("由近到远", "由远到近"), key="board_order")
     if order == "由远到近":
         selected = list(reversed([task for task in selected if task.due_at])) + [task for task in selected if not task.due_at]
     _render_overview(selected, now, recycle)
+    # One-click urgency narrowing on top of the three filters above.
+    quick = "全部"
+    if not recycle:
+        quick = st.segmented_control(
+            "快捷筛选", ("全部", "已过期", "今天到期", "3 天内", "待确认"),
+            default="全部", key="board_quick",
+            help="按紧迫度一键筛选，与上方筛选条件叠加；「待确认」指没有明确截止时刻。") or "全部"
+    default_status = "全部" if recycle else "未完成"
+    if quick != "全部":
+        wanted = {"已过期": "已过期", "今天到期": "今天到期", "3 天内": "3 天内", "待确认": "截止时间待确认"}[quick]
+        selected = [task for task in selected if _group_label(task, now) == wanted]
+    if category != "全部" or kind != "全部" or status != default_status or quick != "全部":
+        # A callback, not an inline assignment: widget-backed state may only be
+        # changed before the widgets are instantiated on the next run.
+        st.button("重置筛选", key="board_reset", on_click=_reset_board_filters, args=(default_status,))
     if not selected:
-        st.info("筛选结果为空。可切换状态筛选，或退出回收站。")
+        st.info("筛选结果为空。可切换筛选条件，或点「重置筛选」。")
         return
-    st.dataframe([{"编号": task.id, "标题": task.title, "课程 / 活动": task.category or "—", "类型": task.task_type,
-                   "截止时间（北京）": format_deadline(task.due_at), "状态": urgency(task, now)} for task in selected],
-                 hide_index=True, use_container_width=True,
-                 column_config={
-                     "编号": st.column_config.NumberColumn(width="small"),
-                     "标题": st.column_config.TextColumn(width="large"),
-                     "课程 / 活动": st.column_config.TextColumn(width="medium"),
-                     "类型": st.column_config.TextColumn(width="small"),
-                     "截止时间（北京）": st.column_config.TextColumn(width="medium"),
-                     "状态": st.column_config.TextColumn(width="small"),
-                 })
+    # Four columns keep the status visible; the id lives in the task picker below and
+    # the type is folded into the course cell, so nothing important scrolls off-screen.
+    table = st.dataframe([{"标题": task.title,
+                           "课程 / 活动": f"{task.category or '未分类'} · {task.task_type}",
+                           "截止时间（北京）": format_deadline(task.due_at),
+                           "状态": urgency(task, now)} for task in selected],
+                         hide_index=True, use_container_width=True,
+                         column_config={
+                             "标题": st.column_config.TextColumn(width="large"),
+                             "课程 / 活动": st.column_config.TextColumn(width="medium"),
+                             "截止时间（北京）": st.column_config.TextColumn(width="medium"),
+                             "状态": st.column_config.TextColumn(width="small"),
+                         },
+                         on_select="rerun", selection_mode="single-row", key="board_table")
+    rows = getattr(getattr(table, "selection", None), "rows", None) or []
+    if rows and rows[0] < len(selected):
+        picked = selected[rows[0]].id
+        if st.session_state.get("board_task") != picked:
+            # Clicking a row is the same as choosing it below: one selection, two ways in.
+            st.session_state["board_task"] = picked
+            st.rerun()
     task_id = st.selectbox("选择要管理的任务", [task.id for task in selected], format_func=lambda value: f"#{value} " + next(task.title for task in selected if task.id == value), key="board_task")
     task = next(task for task in selected if task.id == task_id)
     _render_task_actions(repository, task, selected, now, recycle)

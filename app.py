@@ -21,8 +21,15 @@ from pku_deadline_agent.zhihuishu_review_page import invalidate_review, render_z
 
 def main() -> None:
     st.set_page_config(page_title="PKU Deadline", page_icon="📅", layout="wide")
-    st.title("PKU Deadline")
-    st.caption("所有日期均为北京时间 Asia/Shanghai")
+    # One slim header instead of a 48px title + caption on every page: the page's
+    # own heading already says where you are, so this only carries brand and clock.
+    now = beijing_now()
+    st.markdown(
+        "<div style='display:flex;justify-content:space-between;align-items:baseline;"
+        "border-bottom:1px solid rgba(128,128,128,.25);padding-bottom:.3rem;margin-bottom:.8rem'>"
+        "<span style='font-size:1.15rem;font-weight:700'>📅 PKU Deadline</span>"
+        f"<span style='font-size:.8rem;opacity:.65'>北京时间 {now:%Y-%m-%d %H:%M}</span></div>",
+        unsafe_allow_html=True)
 
     with st.sidebar:
         page = st.radio("功能", ("手动待办", "通知隐私预览", "Deadline 智能解析", "编程网格导入",
