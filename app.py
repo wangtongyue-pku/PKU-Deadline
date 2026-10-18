@@ -37,6 +37,99 @@ NAV_ICONS = {
     "提醒与备份": "🔔",
     "AI 设置": "⚙️",
 }
+# Short, stable slugs so ?page=zhihuishu can be bookmarked; the Chinese page names
+# stay the single source of truth everywhere else.
+PAGE_SLUGS = {
+    "manual": "手动待办", "grid": "编程网格导入", "mail": "学校邮箱",
+    "zhihuishu": "智慧树任务预览", "yuetang": "问学阅堂",
+    "notice": "通知隐私预览", "parse": "Deadline 智能解析",
+    "reminders": "提醒与备份", "ai": "AI 设置",
+}
+SLUG_BY_PAGE = {page: slug for slug, page in PAGE_SLUGS.items()}
+# Pages that already open the database may offer quick add; the platform pages
+# deliberately render before any database initialize, so they never do.
+QUICK_ADD_PAGES = ("手动待办", "编程网格导入", "学校邮箱", "提醒与备份")
+
+
+def page_from_query(value) -> str | None:
+    """Map a query parameter to a page name. Unknown or empty values are ignored."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    slug = str(value or "").strip().lower()
+    return PAGE_SLUGS.get(slug)
+
+
+def _open_page_from_url() -> None:
+    """A bookmark such as ?page=zhihuishu seeds the page on a fresh session only.
+
+    Once the session has a page, the sidebar is the source of truth: the URL is
+    kept in sync by _remember_page_in_url, so it must never fight the user's click.
+    """
+    if "page" in st.session_state:
+        return
+    try:
+        requested = st.query_params.get("page")
+    except Exception:  # pragma: no cover - query params are optional
+        return
+    page = page_from_query(requested)
+    if page is not None:
+        st.session_state["page"] = page
+
+
+def _remember_page_in_url(page: str) -> None:
+    slug = SLUG_BY_PAGE.get(page)
+    if slug is None:
+        return
+    try:
+        if st.query_params.get("page") != slug:
+            st.query_params["page"] = slug
+    except Exception:  # pragma: no cover - query params are optional
+        return
+
+
+def _render_sidebar_quick_add() -> None:
+    """Add a task from any page that already has the database open.
+
+    Deliberately minimal: title, optional course, optional deadline. Anything that
+    needs a duplicate/change decision is sent to 手动待办 instead of guessed here.
+    """
+    with st.expander("快速添加任务", expanded=False):
+        with st.form("sidebar_add_task", clear_on_submit=True):
+            title = st.text_input("任务标题", max_chars=200, key="quick_title",
+                                  placeholder="例如：交数据结构作业")
+            category = st.text_input("课程 / 活动（选填）", max_chars=100, key="quick_category")
+            date_column, time_column = st.columns(2)
+            due_date = date_column.date_input("截止日期（选填）", value=None, key="quick_date")
+            due_time = time_column.time_input("截止时刻（选填）", value=None, key="quick_time")
+            submitted = st.form_submit_button("保存任务")
+        if not submitted:
+            return
+        if not title.strip():
+            st.error("请填写任务标题。")
+            return
+        due_at = None
+        if due_date is not None and due_time is not None:
+            due_at = datetime.combine(due_date, due_time, tzinfo=BEIJING)
+        elif due_date is not None:
+            st.caption("只填了日期：保存为「待确认」截止，不会替你补成午夜。")
+        repository = TaskRepository(database_path())
+        try:
+            repository.initialize()
+            candidate = ExtractedTask(1, title.strip(), category.strip(), TASK_TYPES[0], None, due_at, False, ())
+            repository._validate_fields(title, category, TASK_TYPES[0], due_at)
+            if repository.suggestions(candidate, NoticeOrigin("manual")):
+                st.warning("可能有重复任务：请到「手动待办」核对后再添加，这里不替你决定。")
+                return
+            repository.apply_reviewed_tasks((candidate,), (ImportDecision("new", reason="侧栏快速添加任务"),),
+                                            (NoticeOrigin("manual"),), confirmed=True)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        except (sqlite3.Error, OSError):
+            st.error("保存失败，请检查数据库权限或可用空间。")
+            return
+        st.success(f"已保存「{title.strip()}」。")
+        st.rerun()
 
 
 def main() -> None:
@@ -52,9 +145,13 @@ def main() -> None:
         unsafe_allow_html=True)
 
     with st.sidebar:
+        _open_page_from_url()
         page = st.radio("功能", NAV_PAGES, key="page",
                         format_func=lambda value: f"{NAV_ICONS[value]} {value}")
         st.caption("① 任务 ｜ ② 导入（四个来源） ｜ ③ 设置与工具")
+        _remember_page_in_url(page)
+        if page in QUICK_ADD_PAGES:
+            _render_sidebar_quick_add()
         st.divider()
         with st.expander("这个程序做什么", expanded=False):
             st.write(

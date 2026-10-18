@@ -6,4 +6,11 @@ address = "127.0.0.1"
 headless = true
 
 [theme]
+# PKU crimson stays the single accent; the rest is a light, low-contrast shell so
+# the task table and the warning banners are what stands out.
+base = "light"
 primaryColor = "#9B1C31"
+secondaryBackgroundColor = "#F6F5F3"
+font = "sans serif"
+
+# 想换深色界面：把 base 改成 "dark" 并重启（见 README「外观」）。

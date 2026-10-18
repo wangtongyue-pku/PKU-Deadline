@@ -165,7 +165,10 @@ def render_task_board(repository):
             st.rerun()
     task_id = st.selectbox("选择要管理的任务", [task.id for task in selected], format_func=lambda value: f"#{value} " + next(task.title for task in selected if task.id == value), key="board_task")
     task = next(task for task in selected if task.id == task_id)
-    _render_task_actions(repository, task, selected, now, recycle)
+    # Folded away: the list is the reason to open this page, and the edit form is
+    # only needed once a task is actually being changed.
+    with st.expander(f"管理这条任务（#{task.id} · {task.title}）", expanded=False):
+        _render_task_actions(repository, task, selected, now, recycle)
 
 
 def _render_overview(selected, now: datetime, recycle: bool) -> None:

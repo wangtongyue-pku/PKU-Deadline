@@ -1,5 +1,16 @@
 # Codex / DSH 交接记录
 
+## 最新：界面第三批（P2 打磨，2026-10-18，DSH）
+
+用户「继续吧」后做完 P2 四项。浏览器实测（临时实例 + 数据库副本）。
+
+- **页面可收藏**：`app.py` 加 `PAGE_SLUGS`（`manual / grid / mail / zhihuishu / yuetang / notice / parse / reminders / ai`）。`?page=zhihuishu` 这类地址可收藏；`_open_page_from_url()` **只在新会话**（`page` 尚未写入 session_state 时）用它播种，随后由 `_remember_page_in_url()` 保持地址与所选页面同步。**注意**：恢复绝不能覆盖已有选择——第一版就是这样把测试里「点侧栏切页」压回原页，改成只播种后恢复正常。
+- **侧栏快速添加**：`_render_sidebar_quick_add()`，仅在已经打开数据库的页面（手动待办 / 编程网格导入 / 学校邮箱 / 提醒与备份）出现；平台页依旧在任何 `initialize` 之前渲染，因此不提供。只收标题 + 可选课程 + 可选截止；日期无时刻保存为「待确认」；发现可能重复**不替你决定**，提示去「手动待办」核对。
+- **待办页更短**：`管理这条任务（#id · 标题）` 收进默认折叠的 expander（编辑 / 历史两个 tab 仍在里面），widget key 不变，18 项看板测试照常。
+- **外观**：`.streamlit/config.toml` 补 `base = "light"`、`secondaryBackgroundColor = "#F6F5F3"`、`font = "sans serif"`，主色仍是 `#9B1C31`；README 新增「外观」小节说明改 `base = "dark"` 即可深色。
+- 文档：README 补「添加任务」（含侧栏快速添加与折叠说明）与「收藏某个页面」。
+- 说明：任务详情**没有**改成 `st.dialog` 模态框——现有 18 项看板测试直接操作 `manage_{id}_{revision}_*` 控件，模态框关闭时这些控件不渲染，会整批失效；折叠 expander 达到同样的「页面更短」目的且不牺牲键盘操作。
+
 ## 最新：界面第二批（P1，2026-10-18，DSH）
 
 用户看完第一批后要求继续 1→2→4→3。全量 **1291 项通过**，浏览器实测（临时实例 + 数据库副本，未点「启动提醒」以免弹真窗）。
